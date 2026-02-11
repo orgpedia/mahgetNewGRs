@@ -205,3 +205,10 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+.env
+LFS/
+mahgetGR
+mahgetAllGR
+.bak
+*~
+GITHUB_ACTIONS_WEB_UI_TEMPLATE.md

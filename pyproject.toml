@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mahget-newgr"
+version = "0.1.0"
+description = "Unified Maharashtra GR pipeline with ledger, crawl, and sync workflows."
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "internetarchive>=5.0.5",
+    "huggingface-hub>=0.28.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+]
+
+[project.scripts]
+mahget-newgr = "cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "import/src"}
+py-modules = [
+    "archive_job",
+    "append_ledger",
+    "backfill_lfs_path",
+    "build_baseline_ledger",
+    "cli",
+    "command_core",
+    "commands",
+    "department_codes",
+    "gr_site_job",
+    "import_pdfs_job",
+    "job_utils",
+    "ledger_engine",
+    "local_env",
+    "readme_status",
+    "stage_download",
+    "sync_hf_job",
+    "validate_ledger",
+    "wayback_job",
+    "workflow_commands",
+]
