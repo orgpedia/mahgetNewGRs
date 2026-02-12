@@ -169,10 +169,13 @@ def run_import_pdfs(config: ImportPdfsConfig) -> ImportPdfsReport:
             report.skipped_conflicts += 1
 
         if not config.dry_run and destination.exists() and destination.is_file():
+            destination_relpath = to_ledger_relative_path(destination)
+            if record.get("lfs_path") == destination_relpath:
+                continue
             store.upsert(
                 {
                     "unique_code": unique_code,
-                    "lfs_path": to_ledger_relative_path(destination),
+                    "lfs_path": destination_relpath,
                 }
             )
 

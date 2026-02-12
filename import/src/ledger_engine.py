@@ -319,6 +319,23 @@ class LedgerStore:
                     )
                 self._index[unique_code] = RecordLocation(partition=partition, index=index)
 
+    def _reindex_partition(self, partition: str) -> None:
+        stale_codes = [code for code, location in self._index.items() if location.partition == partition]
+        for code in stale_codes:
+            del self._index[code]
+
+        rows = self._read_partition(partition)
+        for index, row in enumerate(rows):
+            unique_code = row.get("unique_code")
+            if not isinstance(unique_code, str) or not unique_code:
+                continue
+            existing = self._index.get(unique_code)
+            if existing is not None and existing.partition != partition:
+                raise DuplicateUniqueCodeError(
+                    f"Duplicate unique_code={unique_code} in partitions {existing.partition} and {partition}"
+                )
+            self._index[unique_code] = RecordLocation(partition=partition, index=index)
+
     def list_partitions(self) -> list[str]:
         return sorted(self._partition_cache.keys() | {path.stem for path in self.ledger_dir.glob("*.jsonl")})
 
@@ -373,7 +390,7 @@ class LedgerStore:
             rows.append(new_record)
             rows.sort(key=lambda item: str(item.get("unique_code", "")))
             self._write_partition(target_partition, rows)
-            self.refresh_index()
+            self._reindex_partition(target_partition)
             return UpsertResult(operation="inserted", partition=target_partition, unique_code=unique_code)
 
         source_partition = location.partition
@@ -405,7 +422,7 @@ class LedgerStore:
             rows[location.index] = updated_record
             rows.sort(key=lambda item: str(item.get("unique_code", "")))
             self._write_partition(source_partition, rows)
-            self.refresh_index()
+            self._reindex_partition(source_partition)
             return UpsertResult(operation="updated", partition=target_partition, unique_code=unique_code)
 
         source_rows = [row for row in rows if row.get("unique_code") != unique_code]
@@ -417,7 +434,8 @@ class LedgerStore:
 
         self._write_partition(source_partition, source_rows)
         self._write_partition(target_partition, target_rows)
-        self.refresh_index()
+        self._reindex_partition(source_partition)
+        self._reindex_partition(target_partition)
         return UpsertResult(operation="moved", partition=target_partition, unique_code=unique_code)
 
     def apply_stage_result(

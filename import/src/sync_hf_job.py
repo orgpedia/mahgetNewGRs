@@ -182,6 +182,8 @@ def _iter_upload_targets(local_root: Path, include_ledger: bool) -> list[tuple[P
     for entry in sorted(local_root.iterdir(), key=lambda path: path.name):
         if entry.name in {".git", "__pycache__"}:
             continue
+        if entry.name.startswith("."):
+            continue
         if entry.name == "import":
             if not include_ledger:
                 continue

@@ -9,6 +9,7 @@ import archive_job
 import append_ledger
 import backfill_lfs_path
 import build_baseline_ledger
+import download_pdfs
 import gr_site_job
 import import_pdfs_job
 import readme_status
@@ -157,6 +158,23 @@ class ImportPdfsCommand(Command):
         )
 
 
+class DownloadPdfsCommand(Command):
+    name = "download-pdfs"
+    help = "Download missing PDFs and batch-import"
+    description = "Download ledger records with null lfs_path, import in batches, and sync to Hugging Face."
+
+    def configure_parser(self, parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+        return download_pdfs.configure_parser(parser)
+
+    def run(self, args: argparse.Namespace, context: CommandContext) -> CommandResult:
+        exit_code = download_pdfs.run_from_args(args)
+        return CommandResult(
+            name=self.name,
+            exit_code=exit_code,
+            message="" if exit_code == 0 else "download-pdfs failed",
+        )
+
+
 class DailyWorkflowCommand(Command):
     name = "daily"
     help = "Run daily workflow"
@@ -250,6 +268,7 @@ def get_commands() -> Iterable[Command]:
         ValidateLedgerCommand(),
         UpdateReadmeStatusCommand(),
         ImportPdfsCommand(),
+        DownloadPdfsCommand(),
         GRSiteJobCommand(),
         WaybackJobCommand(),
         ArchiveJobCommand(),

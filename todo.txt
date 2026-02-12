@@ -1,0 +1,7 @@
+1. Currently download-pdf stopping after a batch sync
+2. Also upload of individual file is very very slow, move to 
+    one create_commit with multiple CommitOperationAdd entries (single commit/API transaction for many files)
+3. Make a github action so that the downloads can happen at night
+4. Figure out how sync-hf identifies if the files exist in the repository - use hf_hub apis to download the information and maintain it, use git to only checkout metadata and then keep refreshing etc..
+
+
