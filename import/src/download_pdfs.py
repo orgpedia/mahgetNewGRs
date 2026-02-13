@@ -18,7 +18,7 @@ from sync_hf_job import SyncHFConfig, SyncHFError, resolve_hf_repo_path, run_syn
 
 
 DEFAULT_BATCH_SUCCESS_SIZE = 25
-DEFAULT_MAX_RUNTIME_SEC = 5 * 60 + 45
+DEFAULT_MAX_RUNTIME_SEC = 5 * 60 * 60 + 45 * 60
 DEFAULT_REQUEST_INTERVAL_SEC = 1.0
 DEFAULT_MAX_CONSECUTIVE_FAILURES = 10
 DEFAULT_DOWNLOAD_TIMEOUT_SEC = 30
@@ -351,29 +351,30 @@ def _flush_batch(
         )
         if not repo_files:
             print("download-pdfs: no resolved repo files for targeted sync; falling back to full sync")
-            repo_files = [""]
 
-        for repo_file in repo_files:
-            sync_config = SyncHFConfig(
-                source_root=Path(".").resolve(),
-                hf_repo_path=resolved_hf_repo_path,
-                remote_name=config.hf_remote_name,
-                branch=config.hf_branch,
-                commit_message=config.hf_commit_message,
-                dry_run=False,
-                skip_push=config.hf_skip_push,
-                verify_storage=not config.hf_no_verify_storage,
-                storage_backend=config.hf_storage_backend,
-                hf_token=config.hf_token,
-                hf_remote_url=config.hf_remote_url,
-                file_path=repo_file,
-            )
-            try:
-                run_sync_hf(sync_config)
-            except SyncHFError as exc:
-                print(f"download-pdfs: batch sync failed: {exc}")
-                return False
-            report.sync_runs += 1
+        sync_config = SyncHFConfig(
+            source_root=Path(".").resolve(),
+            hf_repo_path=resolved_hf_repo_path,
+            remote_name=config.hf_remote_name,
+            branch=config.hf_branch,
+            commit_message=config.hf_commit_message,
+            dry_run=False,
+            skip_push=config.hf_skip_push,
+            verify_storage=not config.hf_no_verify_storage,
+            storage_backend=config.hf_storage_backend,
+            hf_token=config.hf_token,
+            hf_remote_url=config.hf_remote_url,
+            file_paths=tuple(repo_files),
+        )
+        try:
+            run_sync_hf(sync_config)
+        except SyncHFError as exc:
+            print(f"download-pdfs: batch sync failed: {exc}")
+            return False
+        except Exception as exc:
+            print(f"download-pdfs: batch sync unexpected failure: {exc}")
+            return False
+        report.sync_runs += 1
         print("download-pdfs: batch sync completed")
 
     report.batches_flushed += 1

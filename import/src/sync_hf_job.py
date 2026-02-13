@@ -13,8 +13,9 @@ from typing import Any
 from local_env import load_local_env
 
 try:
-    from huggingface_hub import HfApi, hf_hub_download
+    from huggingface_hub import CommitOperationAdd, HfApi, hf_hub_download
 except Exception:
+    CommitOperationAdd = None
     HfApi = None
     hf_hub_download = None
 
@@ -59,6 +60,7 @@ class SyncHFConfig:
     mode: str = MODE_UPLOAD
     prefix: str = ""
     file_path: str = ""
+    file_paths: tuple[str, ...] = ()
     include_ledger: bool = False
     large_folder_mode: str = LARGE_FOLDER_MODE_AUTO
     large_folder_threshold: int = DEFAULT_LARGE_FOLDER_THRESHOLD
@@ -243,6 +245,92 @@ def _upload_target(
     return file_count
 
 
+def _supports_create_commit(api: Any) -> bool:
+    return CommitOperationAdd is not None and hasattr(api, "create_commit")
+
+
+def _is_retryable_commit_exception(exc: Exception) -> bool:
+    message = str(exc).strip().lower()
+    retry_markers = (
+        "nodename nor servname provided",
+        "name or service not known",
+        "temporary failure in name resolution",
+        "connection reset",
+        "connection aborted",
+        "connection refused",
+        "timed out",
+        "timeout",
+        "client has been closed",
+    )
+    if any(marker in message for marker in retry_markers):
+        return True
+    return isinstance(exc, OSError)
+
+
+def _upload_files_with_single_commit(
+    *,
+    api: Any,
+    repo_id: str,
+    token: str,
+    file_targets: list[tuple[Path, str]],
+    commit_message: str,
+    revision: str,
+    dry_run: bool,
+) -> int:
+    if not file_targets:
+        return 0
+
+    if dry_run:
+        print(
+            "[dry-run] upload create_commit: "
+            f"{len(file_targets)} files -> repo:{repo_id}"
+        )
+        return len(file_targets)
+
+    if not _supports_create_commit(api):
+        uploaded_files = 0
+        for local_path, path_in_repo in file_targets:
+            uploaded_files += _upload_target(
+                api=api,
+                repo_id=repo_id,
+                token=token,
+                local_path=local_path,
+                path_in_repo=path_in_repo,
+                commit_message=commit_message,
+                revision=revision,
+                include_ledger=True,
+                dry_run=False,
+            )
+        return uploaded_files
+
+    operations = [
+        CommitOperationAdd(path_in_repo=path_in_repo, path_or_fileobj=str(local_path))
+        for local_path, path_in_repo in file_targets
+    ]
+    last_error: Exception | None = None
+    for attempt in (1, 2):
+        try:
+            api.create_commit(
+                repo_id=repo_id,
+                repo_type="dataset",
+                operations=operations,
+                commit_message=commit_message,
+                token=token or None,
+                revision=revision or None,
+            )
+            return len(file_targets)
+        except Exception as exc:
+            last_error = exc
+            if attempt == 1 and _is_retryable_commit_exception(exc):
+                print(f"sync-hf: create_commit attempt {attempt}/2 failed: {exc}; retrying with fresh client")
+                api = _create_api(token)
+                continue
+            break
+    raise SyncHFError(
+        f"create_commit failed for {len(file_targets)} files: {last_error}"
+    ) from last_error
+
+
 def _supports_upload_large_folder(api: Any) -> bool:
     return hasattr(api, "upload_large_folder")
 
@@ -358,15 +446,38 @@ def _run_upload(config: SyncHFConfig) -> tuple[str, int]:
 
     selected_file = _normalize_repo_relpath(config.file_path)
     selected_prefix = _normalize_repo_relpath(config.prefix)
+    selected_files = [
+        normalized
+        for normalized in (_normalize_repo_relpath(file_path) for file_path in config.file_paths)
+        if normalized
+    ]
     if selected_file and selected_prefix:
         raise SyncHFError("Use only one of `--file` or `--prefix`.")
+    if selected_files and (selected_file or selected_prefix):
+        raise SyncHFError("Use only one of `--file`, `--prefix`, or multi-file upload paths.")
     if not config.include_ledger and selected_file and _contains_ledger_segment(selected_file):
+        raise SyncHFError("Ledger upload is disabled by default. Use `--include-ledger` to upload `import/grinfo`.")
+    if not config.include_ledger and any(_contains_ledger_segment(path) for path in selected_files):
         raise SyncHFError("Ledger upload is disabled by default. Use `--include-ledger` to upload `import/grinfo`.")
     if not config.include_ledger and selected_prefix and _contains_ledger_segment(selected_prefix):
         raise SyncHFError("Ledger upload is disabled by default. Use `--include-ledger` to upload `import/grinfo`.")
 
     targets: list[tuple[Path, str]]
-    if selected_file:
+    if selected_files:
+        deduped_files: list[str] = []
+        seen_paths: set[str] = set()
+        for path in selected_files:
+            if path in seen_paths:
+                continue
+            seen_paths.add(path)
+            deduped_files.append(path)
+        targets = []
+        for selected_path in deduped_files:
+            local_file = config.hf_repo_path / selected_path
+            if not local_file.exists() or not local_file.is_file():
+                raise SyncHFError(f"Upload file not found under local path: {local_file}")
+            targets.append((local_file, selected_path))
+    elif selected_file:
         local_file = config.hf_repo_path / selected_file
         if not local_file.exists() or not local_file.is_file():
             raise SyncHFError(f"Upload file not found under local path: {local_file}")
@@ -410,7 +521,10 @@ def _run_upload(config: SyncHFConfig) -> tuple[str, int]:
         for local_path, path_in_repo in targets:
             uploaded_targets.append((path_in_repo, local_path.is_dir()))
     else:
-        for local_path, path_in_repo in targets:
+        directory_targets = [(local_path, path_in_repo) for local_path, path_in_repo in targets if local_path.is_dir()]
+        file_targets = [(local_path, path_in_repo) for local_path, path_in_repo in targets if local_path.is_file()]
+
+        for local_path, path_in_repo in directory_targets:
             uploaded_files += _upload_target(
                 api=api,
                 repo_id=repo_id,
@@ -423,6 +537,19 @@ def _run_upload(config: SyncHFConfig) -> tuple[str, int]:
                 dry_run=config.dry_run,
             )
             uploaded_targets.append((path_in_repo, local_path.is_dir()))
+
+        if file_targets:
+            uploaded_files += _upload_files_with_single_commit(
+                api=api,
+                repo_id=repo_id,
+                token=config.hf_token,
+                file_targets=file_targets,
+                commit_message=config.commit_message,
+                revision=config.branch,
+                dry_run=config.dry_run,
+            )
+            for _, path_in_repo in file_targets:
+                uploaded_targets.append((path_in_repo, False))
 
     if config.verify_storage and not config.dry_run and uploaded_targets:
         _verify_remote_targets(
@@ -493,20 +620,25 @@ def run_sync_hf(config: SyncHFConfig) -> None:
     if mode not in VALID_MODES:
         raise SyncHFError(f"Unsupported mode `{config.mode}`. Use `upload` or `download`.")
 
-    if mode == MODE_UPLOAD:
-        repo_id, file_count = _run_upload(config)
-        print("sync-hf summary:")
-        print("  mode: upload")
-        if repo_id:
-            print(f"  repo_id: {repo_id}")
-        print(f"  files_uploaded: {file_count}")
-        return
+    try:
+        if mode == MODE_UPLOAD:
+            repo_id, file_count = _run_upload(config)
+            print("sync-hf summary:")
+            print("  mode: upload")
+            if repo_id:
+                print(f"  repo_id: {repo_id}")
+            print(f"  files_uploaded: {file_count}")
+            return
 
-    repo_id, file_count = _run_download(config)
-    print("sync-hf summary:")
-    print("  mode: download")
-    print(f"  repo_id: {repo_id}")
-    print(f"  files_downloaded: {file_count}")
+        repo_id, file_count = _run_download(config)
+        print("sync-hf summary:")
+        print("  mode: download")
+        print(f"  repo_id: {repo_id}")
+        print(f"  files_downloaded: {file_count}")
+    except SyncHFError:
+        raise
+    except Exception as exc:
+        raise SyncHFError(f"Unexpected sync-hf failure: {exc}") from exc
 
 
 def configure_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:

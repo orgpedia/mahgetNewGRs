@@ -213,13 +213,15 @@ Expected targets:
 8. `make status-readme`
 9. `make import-pdfs` (one-time backfill utility)
 10. `make append-ledger` (incremental append utility)
-11. `make sync-hf`
+11. `make download-pdfs` (timed missing-PDF backfill utility)
+12. `make sync-hf`
 
 `make sync-hf` contract:
 
 1. Push ledger files from `import/grinfo/` to the Hugging Face dataset path.
 2. Push `LFS/` files using the active HF storage backend (`xet` preferred, `lfs` fallback).
-3. Exit non-zero if any active-backend upload or verification step fails.
+3. Hidden local root entries (for example `.cache`) must be excluded from automatic upload target discovery.
+4. Exit non-zero if any active-backend upload or verification step fails.
 
 ## 10.1 Repository Status Reporting
 
@@ -283,6 +285,40 @@ Expected targets:
 6. Command must print summary counters (scanned, updated, unchanged, set non-null, cleared to null).
 7. Command should support `--dry-run`.
 
+## 10.6 Timed Missing-PDF Backfill (`download-pdfs`)
+
+1. Provide a timed backfill command to fetch missing PDFs from ledger source URLs:
+   - command: `download-pdfs`.
+2. Each invocation must re-read the ledger from disk at startup (no persisted in-memory state between runs).
+3. Candidate filter:
+   - `lfs_path == null`,
+   - non-empty `source_url`,
+   - skip excluded yearly partition (default: `2026.jsonl`).
+4. Candidate processing order must prefer newest data first:
+   - numeric yearly partitions in descending order (`2025`, `2024`, ...),
+   - excluded year skipped,
+   - non-year partitions (for example `unknown`) processed after numeric years.
+5. Downloads must be sequential (no parallelism) and must wait 1 second between URL requests.
+6. Batch flush policy:
+   - trigger flush after 25 successful downloads,
+   - flush must run `import-pdfs` over `import/downloads`,
+   - then run `sync-hf` to push imported artifacts.
+   - batch sync should target the batch files (not full-root re-sync) when resolvable.
+   - if import produced no new/overwritten files, sync step may be skipped for that batch.
+7. On stop conditions, any partial successful batch must still flush before exit (best-effort).
+8. Stop conditions:
+   - hard runtime limit: 5 hours 45 minutes,
+   - 10 consecutive download failures.
+9. Logging/output must include:
+   - total candidate URL count before download begins,
+   - per-file progress (`current of total`, remaining),
+   - stop reason and final counters.
+10. Temporary file behavior:
+    - downloaded temp files are created under `import/downloads/` as `<unique_code>.pdf`,
+    - temp PDFs must be deleted after successful import+sync of that batch,
+    - stale temp PDFs from previous runs should be cleaned at startup.
+11. `download-pdfs` must import into the configured HF local root under `.../pdfs` (for example `LFS/mahGRs/pdfs`) and not into a separate unrelated local tree.
+
 
 ## 11. Data Update Semantics
 
@@ -293,6 +329,7 @@ Expected targets:
 5. `last_seen_crawl_date` is advanced only by monthly full-reconciliation crawl when a known `unique_code` is observed.
 6. Canonical ledger location is `import/grinfo/` (not `data/`).
 7. `append-ledger` is append-only and must not update existing rows.
+8. `download-pdfs` updates existing rows only (no inserts/deletes); primary ledger mutation is setting `lfs_path` (plus standard `updated_at_utc` update).
 
 
 ## 12. Archive Recovery Requirement
@@ -406,6 +443,7 @@ When a record is in `ARCHIVE_UPLOADED_WITHOUT_DOCUMENT` and download later succe
    - `status-readme`,
    - `import-pdfs`,
    - `append-ledger`,
+   - `download-pdfs`,
    - `sync-hf`.
 2. Implement GitHub Actions workflows with 6-hour job limits and one commit per job.
 3. Ensure post-job Hugging Face sync with fixed dataset path and `HF_TOKEN`.
