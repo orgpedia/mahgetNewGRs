@@ -41,11 +41,12 @@ Minimum required fields:
 10. `download` (object: path/status/hash/size/error)
 11. `wayback` (object: archive metadata/status/error)
 12. `archive` (object: identifier/url/status/error)
-13. `first_seen_crawl_date` (date)
-14. `last_seen_crawl_date` (date)
-15. `first_seen_run_type` (`daily` or `monthly`)
-16. `created_at_utc` (timestamp)
-17. `updated_at_utc` (timestamp)
+13. `pdf_info` (object: page/image/font/language/file-size extraction status+metadata)
+14. `first_seen_crawl_date` (date)
+15. `last_seen_crawl_date` (date)
+16. `first_seen_run_type` (`daily` or `monthly`)
+17. `created_at_utc` (timestamp)
+18. `updated_at_utc` (timestamp)
 
 Field semantics for crawl-history fields:
 
@@ -60,6 +61,10 @@ Field semantics for crawl-history fields:
 4. Initialization/update rule:
    - On first insert, set `first_seen_crawl_date == last_seen_crawl_date`.
    - In later runs, only monthly reconciliation may advance `last_seen_crawl_date`.
+
+Backward compatibility note:
+
+1. Legacy rows may temporarily omit `pdf_info` until `pdf-info` backfill runs.
 
 
 ## 4. Normalized States
@@ -214,7 +219,8 @@ Expected targets:
 9. `make import-pdfs` (one-time backfill utility)
 10. `make append-ledger` (incremental append utility)
 11. `make download-pdfs` (timed missing-PDF backfill utility)
-12. `make sync-hf`
+12. `make pdf-info` (PDF metadata extraction utility)
+13. `make sync-hf`
 
 `make sync-hf` contract:
 
@@ -319,12 +325,30 @@ Expected targets:
     - stale temp PDFs from previous runs should be cleaned at startup.
 11. `download-pdfs` must import into the configured HF local root under `.../pdfs` (for example `LFS/mahGRs/pdfs`) and not into a separate unrelated local tree.
 
+## 10.7 PDF Metadata Extraction (`pdf-info`)
+
+1. Provide a command to extract PDF metadata from locally available downloaded/imported PDFs:
+   - command: `pdf-info`.
+2. The command must resolve local PDF path from:
+   - `lfs_path` first,
+   - fallback to `download.path`.
+3. For each resolved PDF, compute and store in `record.pdf_info` at minimum:
+   - `page_count`,
+   - image presence (`has_any_page_image` and `pages_with_images`),
+   - `fonts` dictionary keyed by `font_num` with font details and `words` count,
+   - language inference from Unicode-script word counts (`language` object),
+   - `file_size`.
+4. Font word counts must reflect actual text usage, not merely declared/referenced fonts.
+5. Default execution should skip records already having `pdf_info.status=success`; support forced recompute via `--force`.
+6. Command should support `--max-records` and `--dry-run`.
+7. If local PDF is unavailable, command should skip by default; optional `--mark-missing` may set `pdf_info.status=missing_pdf`.
+
 
 ## 11. Data Update Semantics
 
 1. `unique_code` lookup spans all yearly files plus `unknown.jsonl`.
 2. Inserts only for unknown IDs.
-3. Updates preserve record identity and modify mutable fields (`state`, attempts, metadata, errors, `lfs_path`, timestamps).
+3. Updates preserve record identity and modify mutable fields (`state`, attempts, metadata, errors, `lfs_path`, `pdf_info`, timestamps).
 4. Writes must be atomic to avoid partial ledger corruption.
 5. `last_seen_crawl_date` is advanced only by monthly full-reconciliation crawl when a known `unique_code` is observed.
 6. Canonical ledger location is `import/grinfo/` (not `data/`).
@@ -444,6 +468,7 @@ When a record is in `ARCHIVE_UPLOADED_WITHOUT_DOCUMENT` and download later succe
    - `import-pdfs`,
    - `append-ledger`,
    - `download-pdfs`,
+   - `pdf-info`,
    - `sync-hf`.
 2. Implement GitHub Actions workflows with 6-hour job limits and one commit per job.
 3. Ensure post-job Hugging Face sync with fixed dataset path and `HF_TOKEN`.

@@ -58,10 +58,24 @@ EXPECTED_WAYBACK_FIELDS = {
     "error",
 }
 EXPECTED_ARCHIVE_FIELDS = {"identifier", "url", "status", "error"}
+EXPECTED_PDF_INFO_FIELDS = {
+    "status",
+    "error",
+    "path",
+    "file_size",
+    "page_count",
+    "pages_with_images",
+    "has_any_page_image",
+    "font_count",
+    "fonts",
+    "unresolved_word_count",
+    "language",
+}
 
 ALLOWED_DOWNLOAD_STATUS = {"not_attempted", "attempted", "success", "failed"}
 ALLOWED_WAYBACK_STATUS = {"not_attempted", "success", "failed"}
 ALLOWED_ARCHIVE_STATUS = {"not_attempted", "success", "failed"}
+ALLOWED_PDF_INFO_STATUS = {"not_attempted", "success", "failed", "missing_pdf"}
 
 
 @dataclass
@@ -539,6 +553,122 @@ def validate_state_consistency(
             )
 
 
+def validate_pdf_info(
+    record: dict[str, Any],
+    issues: list[Issue],
+    file_path: Path,
+    line_no: int,
+) -> None:
+    if "pdf_info" not in record:
+        return
+
+    pdf_info = record.get("pdf_info")
+    if not isinstance(pdf_info, dict):
+        add_issue(
+            issues,
+            "error",
+            "pdf_info_not_object",
+            f"pdf_info must be object when present, got {type(pdf_info).__name__}",
+            file_path,
+            line_no,
+        )
+        return
+
+    missing_pdf_info_keys = sorted(EXPECTED_PDF_INFO_FIELDS - set(pdf_info.keys()))
+    if missing_pdf_info_keys:
+        add_issue(
+            issues,
+            "warning",
+            "pdf_info_missing_keys",
+            f"pdf_info missing keys: {missing_pdf_info_keys}",
+            file_path,
+            line_no,
+        )
+
+    status = pdf_info.get("status")
+    if status not in ALLOWED_PDF_INFO_STATUS:
+        add_issue(
+            issues,
+            "error",
+            "pdf_info_status_invalid",
+            f"pdf_info.status={status!r} is invalid",
+            file_path,
+            line_no,
+        )
+
+    file_size = pdf_info.get("file_size")
+    if file_size is not None and not isinstance(file_size, int):
+        add_issue(
+            issues,
+            "error",
+            "pdf_info_file_size_invalid_type",
+            f"pdf_info.file_size must be int or null, got {type(file_size).__name__}",
+            file_path,
+            line_no,
+        )
+
+    page_count = pdf_info.get("page_count")
+    if page_count is not None and not isinstance(page_count, int):
+        add_issue(
+            issues,
+            "error",
+            "pdf_info_page_count_invalid_type",
+            f"pdf_info.page_count must be int or null, got {type(page_count).__name__}",
+            file_path,
+            line_no,
+        )
+
+    pages_with_images = pdf_info.get("pages_with_images")
+    if pages_with_images is not None and not isinstance(pages_with_images, int):
+        add_issue(
+            issues,
+            "warning",
+            "pdf_info_pages_with_images_invalid_type",
+            (
+                "pdf_info.pages_with_images should be int or null, "
+                f"got {type(pages_with_images).__name__}"
+            ),
+            file_path,
+            line_no,
+        )
+
+    has_any_page_image = pdf_info.get("has_any_page_image")
+    if has_any_page_image is not None and not isinstance(has_any_page_image, bool):
+        add_issue(
+            issues,
+            "warning",
+            "pdf_info_has_any_page_image_invalid_type",
+            (
+                "pdf_info.has_any_page_image should be bool or null, "
+                f"got {type(has_any_page_image).__name__}"
+            ),
+            file_path,
+            line_no,
+        )
+
+    fonts = pdf_info.get("fonts")
+    if fonts is not None and not isinstance(fonts, dict):
+        add_issue(
+            issues,
+            "warning",
+            "pdf_info_fonts_invalid_type",
+            f"pdf_info.fonts should be object, got {type(fonts).__name__}",
+            file_path,
+            line_no,
+        )
+
+    language = pdf_info.get("language")
+    if language is not None and not isinstance(language, dict):
+        add_issue(
+            issues,
+            "warning",
+            "pdf_info_language_invalid_type",
+            f"pdf_info.language should be object, got {type(language).__name__}",
+            file_path,
+            line_no,
+        )
+
+
 def validate_dates_and_timestamps(
     record: dict[str, Any],
     issues: list[Issue],
@@ -754,6 +884,12 @@ def validate_ledger(ledger_dir: Path) -> tuple[list[Issue], Counter, int]:
                     line_no=line_no,
                 )
                 validate_state_consistency(
+                    record=record,
+                    issues=issues,
+                    file_path=jsonl_file,
+                    line_no=line_no,
+                )
+                validate_pdf_info(
                     record=record,
                     issues=issues,
                     file_path=jsonl_file,

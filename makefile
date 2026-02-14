@@ -11,7 +11,7 @@ ifeq ($(strip $(HF_REPO_PATH)),)
 HF_REPO_PATH := LFS/mahGRs
 endif
 
-.PHONY: help baseline-ledger append-ledger backfill-lfs-path download-pdfs validate status-readme import-pdfs daily weekly monthly job-gr-site job-wayback job-archive sync-hf
+.PHONY: help baseline-ledger append-ledger backfill-lfs-path download-pdfs pdf-info validate status-readme import-pdfs daily weekly monthly job-gr-site job-wayback job-archive sync-hf
 
 help:
 	@echo "Usage: make <target>"
@@ -21,6 +21,7 @@ help:
 	@echo "  append-ledger    Append only new records from mahgetGR into ledger"
 	@echo "  backfill-lfs-path Backfill ledger lfs_path from local LFS PDFs"
 	@echo "  download-pdfs    Download null lfs_path PDFs, import in batches, sync HF"
+	@echo "  pdf-info         Extract PDF metadata into ledger pdf_info"
 	@echo "  validate         Validate yearly JSONL ledgers"
 	@echo "  status-readme    Refresh README status table from ledger"
 	@echo "  import-pdfs      Import local PDFs into LFS/pdfs and sync HF"
@@ -46,6 +47,10 @@ backfill-lfs-path:
 
 download-pdfs:
 	$(CLI) download-pdfs --ledger-dir $(LEDGER_DIR) --hf-repo-path "$(HF_REPO_PATH)" --lfs-pdf-root "$(HF_REPO_PATH)/pdfs"
+	$(CLI) update-readme-status --ledger-dir $(LEDGER_DIR) --readme-path README.md
+
+pdf-info:
+	$(CLI) pdf-info --ledger-dir $(LEDGER_DIR)
 	$(CLI) update-readme-status --ledger-dir $(LEDGER_DIR) --readme-path README.md
 
 validate:

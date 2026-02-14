@@ -12,6 +12,7 @@ import build_baseline_ledger
 import download_pdfs
 import gr_site_job
 import import_pdfs_job
+import pdf_info_job
 import readme_status
 import sync_hf_job
 import validate_ledger
@@ -175,6 +176,23 @@ class DownloadPdfsCommand(Command):
         )
 
 
+class PdfInfoCommand(Command):
+    name = "pdf-info"
+    help = "Extract PDF metadata into ledger"
+    description = "Extract page/image/font/language/file-size metadata from local PDFs into record.pdf_info."
+
+    def configure_parser(self, parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+        return pdf_info_job.configure_parser(parser)
+
+    def run(self, args: argparse.Namespace, context: CommandContext) -> CommandResult:
+        exit_code = pdf_info_job.run_from_args(args)
+        return CommandResult(
+            name=self.name,
+            exit_code=exit_code,
+            message="" if exit_code == 0 else "pdf-info failed",
+        )
+
+
 class DailyWorkflowCommand(Command):
     name = "daily"
     help = "Run daily workflow"
@@ -269,6 +287,7 @@ def get_commands() -> Iterable[Command]:
         UpdateReadmeStatusCommand(),
         ImportPdfsCommand(),
         DownloadPdfsCommand(),
+        PdfInfoCommand(),
         GRSiteJobCommand(),
         WaybackJobCommand(),
         ArchiveJobCommand(),

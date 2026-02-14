@@ -11,6 +11,7 @@ requires-python = ">=3.9"
 dependencies = [
     "internetarchive>=5.0.5",
     "huggingface-hub>=0.28.0",
+    "pymupdf>=1.24.0",
 ]
 
 [project.optional-dependencies]
@@ -38,6 +39,7 @@ py-modules = [
     "job_utils",
     "ledger_engine",
     "local_env",
+    "pdf_info_job",
     "readme_status",
     "stage_download",
     "sync_hf_job",
