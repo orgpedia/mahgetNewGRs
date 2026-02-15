@@ -1,0 +1,5 @@
+attempt_thresholds:
+  download: 3
+  wayback: 3
+  archive: 3
+  hf: 3

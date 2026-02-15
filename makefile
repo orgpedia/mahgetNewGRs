@@ -11,13 +11,14 @@ ifeq ($(strip $(HF_REPO_PATH)),)
 HF_REPO_PATH := LFS/mahGRs
 endif
 
-.PHONY: help baseline-ledger append-ledger backfill-lfs-path download-pdfs pdf-info validate status-readme import-pdfs daily weekly monthly job-gr-site job-wayback job-archive sync-hf
+.PHONY: help baseline-ledger migrate-infos append-ledger backfill-lfs-path download-pdfs pdf-info validate status-readme import-pdfs daily weekly monthly job-gr-site job-wayback job-archive sync-hf
 
 help:
 	@echo "Usage: make <target>"
 	@echo ""
 	@echo "Targets:"
 	@echo "  baseline-ledger  Build baseline ledger from mahgetGR + mahgetAllGR"
+	@echo "  migrate-infos    Split import/grinfo into urlinfos/uploadinfos/pdfinfos"
 	@echo "  append-ledger    Append only new records from mahgetGR into ledger"
 	@echo "  backfill-lfs-path Backfill ledger lfs_path from local LFS PDFs"
 	@echo "  download-pdfs    Download null lfs_path PDFs, import in batches, sync HF"
@@ -36,6 +37,9 @@ help:
 baseline-ledger:
 	$(CLI) baseline-ledger --clean-output
 	$(CLI) update-readme-status --ledger-dir $(LEDGER_DIR) --readme-path README.md
+
+migrate-infos:
+	$(CLI) migrate-infos --source-ledger-dir $(LEDGER_DIR)
 
 append-ledger:
 	$(CLI) append-ledger --mahgetgr-root mahgetGR --ledger-dir $(LEDGER_DIR)

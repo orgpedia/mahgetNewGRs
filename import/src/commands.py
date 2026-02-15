@@ -12,6 +12,7 @@ import build_baseline_ledger
 import download_pdfs
 import gr_site_job
 import import_pdfs_job
+import migrate_infos
 import pdf_info_job
 import readme_status
 import sync_hf_job
@@ -54,6 +55,23 @@ class ValidateLedgerCommand(Command):
             name=self.name,
             exit_code=exit_code,
             message="" if exit_code == 0 else "validate-ledger reported issues",
+        )
+
+
+class MigrateInfosCommand(Command):
+    name = "migrate-infos"
+    help = "Split grinfo into urlinfos/uploadinfos/pdfinfos"
+    description = "One-time migration from import/grinfo into split info ledgers."
+
+    def configure_parser(self, parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+        return migrate_infos.configure_parser(parser)
+
+    def run(self, args: argparse.Namespace, context: CommandContext) -> CommandResult:
+        exit_code = migrate_infos.run_from_args(args)
+        return CommandResult(
+            name=self.name,
+            exit_code=exit_code,
+            message="" if exit_code == 0 else "migrate-infos failed",
         )
 
 
@@ -281,6 +299,7 @@ class UpdateReadmeStatusCommand(Command):
 def get_commands() -> Iterable[Command]:
     return [
         BaselineLedgerCommand(),
+        MigrateInfosCommand(),
         AppendLedgerCommand(),
         BackfillLfsPathCommand(),
         ValidateLedgerCommand(),
