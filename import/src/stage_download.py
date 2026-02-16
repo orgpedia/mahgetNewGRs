@@ -9,8 +9,9 @@ import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from info_store import InfoStore as LedgerStore
 from job_utils import detect_service_failure, ensure_parent_dir, filter_stage_records
-from ledger_engine import LedgerStore, RetryLimitExceededError, to_ledger_relative_path
+from ledger_engine import RetryLimitExceededError, to_ledger_relative_path
 
 
 SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9._-]+")

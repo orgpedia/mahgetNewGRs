@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from info_store import InfoStore as LedgerStore
 from ledger_engine import (
     STATE_ARCHIVE_UPLOADED_WITH_WAYBACK_URL,
     STATE_ARCHIVE_UPLOADED_WITHOUT_DOCUMENT,
@@ -18,7 +19,6 @@ from ledger_engine import (
     STATE_FETCHED,
     STATE_WAYBACK_UPLOADED,
     STATE_WAYBACK_UPLOAD_FAILED,
-    LedgerStore,
 )
 from local_env import load_local_env
 
@@ -225,7 +225,7 @@ def update_readme_status(*, readme_path: Path, content: str) -> bool:
 
 def configure_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.description = "Update README with auto-generated repository status table."
-    parser.add_argument("--ledger-dir", default="import/grinfo", help="Ledger directory")
+    parser.add_argument("--ledger-dir", default="import/grinfo", help="Ledger root directory (supports split ledgers)")
     parser.add_argument("--readme-path", default="README.md", help="README path to update")
     parser.add_argument("--lfs-pdf-root", default="LFS/pdfs", help="LFS PDF root for file count")
     parser.add_argument("--print-only", action="store_true", help="Print status markdown without writing README")

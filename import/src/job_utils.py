@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
-from ledger_engine import LedgerStore
+from info_store import InfoStore as LedgerStore
 
 
 @dataclass(frozen=True)

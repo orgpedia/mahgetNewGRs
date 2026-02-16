@@ -14,7 +14,8 @@ from typing import Any
 from urllib.parse import unquote
 
 from department_codes import department_code_from_name
-from ledger_engine import LedgerStore, STATE_FETCHED
+from info_store import InfoStore as LedgerStore
+from ledger_engine import STATE_FETCHED
 from local_env import load_local_env
 from stage_download import DownloadStageConfig, DownloadStageReport, run_download_stage
 
@@ -228,7 +229,7 @@ def configure_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser
         choices=("daily", "weekly", "monthly"),
         help="Run mode",
     )
-    parser.add_argument("--ledger-dir", default="import/grinfo", help="Ledger directory containing yearly JSONL files")
+    parser.add_argument("--ledger-dir", default="import/grinfo", help="Ledger root directory (supports split ledgers)")
     parser.add_argument(
         "--source-dir",
         default="import/websites/gr.maharashtra.gov.in",

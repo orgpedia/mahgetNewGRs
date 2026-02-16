@@ -14,7 +14,8 @@ from pathlib import Path
 from typing import Any
 
 from job_utils import detect_service_failure, filter_stage_records, load_code_filter, parse_state_list
-from ledger_engine import LedgerStore, RetryLimitExceededError
+from info_store import InfoStore as LedgerStore
+from ledger_engine import RetryLimitExceededError
 from local_env import load_local_env
 
 
@@ -300,7 +301,7 @@ def run_wayback_job(config: WaybackJobConfig) -> WaybackJobReport:
 
 def configure_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.description = "Run Wayback SPN2 upload stage for eligible ledger records."
-    parser.add_argument("--ledger-dir", default="import/grinfo", help="Ledger directory")
+    parser.add_argument("--ledger-dir", default="import/grinfo", help="Ledger root directory (supports split ledgers)")
     parser.add_argument("--codes-file", default="", help="Optional file containing unique codes to process")
     parser.add_argument("--code", action="append", default=[], help="Explicit unique_code values to process")
     parser.add_argument("--allowed-state", action="append", default=[], help="Override allowed states")

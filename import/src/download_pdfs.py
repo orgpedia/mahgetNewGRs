@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import import_pdfs_job
-from ledger_engine import LedgerStore
+from info_store import InfoStore as LedgerStore
 from local_env import load_local_env
 from sync_hf_job import SyncHFConfig, SyncHFError, resolve_hf_repo_path, run_sync_hf
 
@@ -22,7 +22,11 @@ DEFAULT_MAX_RUNTIME_SEC = 5 * 60 * 60 + 45 * 60
 DEFAULT_REQUEST_INTERVAL_SEC = 1.0
 DEFAULT_MAX_CONSECUTIVE_FAILURES = 10
 DEFAULT_DOWNLOAD_TIMEOUT_SEC = 30
-DEFAULT_SKIP_YEAR = "2026"
+DEFAULT_SKIP_YEAR = ""
+MAX_DOWNLOAD_ATTEMPTS = 2
+DEFAULT_START_YEAR = 2025
+URL_NS = "urlinfos"
+UPLOAD_NS = "uploadinfos"
 
 
 @dataclass(frozen=True)
@@ -30,6 +34,7 @@ class DownloadCandidate:
     unique_code: str
     source_url: str
     partition: str
+    gr_date: str
 
 
 @dataclass(frozen=True)
@@ -52,6 +57,7 @@ class DownloadPdfsConfig:
     max_consecutive_failures: int
     download_timeout_sec: int
     skip_year: str
+    start_year: int
 
 
 @dataclass
@@ -81,7 +87,7 @@ def configure_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser
         "Backfill missing PDFs for ledger rows where lfs_path is null, "
         "import into LFS, then sync to Hugging Face in batches."
     )
-    parser.add_argument("--ledger-dir", default="import/grinfo", help="Ledger directory containing yearly JSONL files")
+    parser.add_argument("--ledger-dir", default="import/grinfo", help="Ledger root directory (supports split ledgers)")
     parser.add_argument(
         "--downloads-dir",
         default="import/downloads",
@@ -148,52 +154,141 @@ def configure_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser
     parser.add_argument(
         "--skip-year",
         default=DEFAULT_SKIP_YEAR,
-        help="Skip this yearly ledger partition (for example 2026)",
+        help="Optional: skip one yearly ledger partition (for example 2026)",
+    )
+    parser.add_argument(
+        "--start-year",
+        type=int,
+        default=DEFAULT_START_YEAR,
+        help="Start year for scan order (downloads walk backward: start-year, start-year-1, ...)",
     )
     return parser
 
 
-def _partition_sort_key(ledger_file: Path) -> tuple[int, int, str]:
-    partition = ledger_file.stem
-    if partition.isdigit():
-        return (0, -int(partition), partition)
-    if partition == "unknown":
-        return (2, 0, partition)
-    return (1, 0, partition)
+def _to_int(value: object, default: int = 0) -> int:
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        if value.is_integer():
+            return int(value)
+        return default
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return default
+        try:
+            return int(text)
+        except ValueError:
+            return default
+    return default
 
 
-def _collect_candidates(config: DownloadPdfsConfig, report: DownloadPdfsReport) -> list[DownloadCandidate]:
+def _download_attempts(record: dict[str, object]) -> int:
+    attempts_obj = record.get("attempt_counts")
+    if not isinstance(attempts_obj, dict):
+        return 0
+    return max(0, _to_int(attempts_obj.get("download"), 0))
+
+
+def _partition_year(partition: str) -> int | None:
+    text = partition.strip()
+    if not text.isdigit():
+        return None
+    return int(text)
+
+
+def _upsert_download_attempt(
+    *,
+    store: LedgerStore,
+    unique_code: str,
+    attempts: int,
+) -> None:
+    patch = {
+        "unique_code": unique_code,
+        "download": {
+            "attempts": max(0, attempts),
+        },
+    }
+    store.upsert(patch)
+
+
+def _load_upload_partition_rows(upload_dir: Path, partition: str) -> dict[str, dict[str, object]]:
+    path = upload_dir / f"{partition}.jsonl"
+    if not path.exists() or not path.is_file():
+        return {}
+
+    rows: dict[str, dict[str, object]] = {}
+    with path.open("r", encoding="utf-8") as handle:
+        for raw_line in handle:
+            text = raw_line.strip()
+            if not text:
+                continue
+            try:
+                obj = json.loads(text)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(obj, dict):
+                continue
+            key = str(obj.get("record_key") or "").strip()
+            if key:
+                rows[key] = obj
+    return rows
+
+
+def _collect_candidates(
+    *,
+    store: LedgerStore,
+    config: DownloadPdfsConfig,
+    report: DownloadPdfsReport,
+) -> list[DownloadCandidate]:
     candidates: list[DownloadCandidate] = []
     seen_codes: set[str] = set()
+    url_dir = store.root_dir / URL_NS
+    upload_dir = store.root_dir / UPLOAD_NS
 
-    partition_files = sorted(config.ledger_dir.glob("*.jsonl"), key=_partition_sort_key)
-    for ledger_file in partition_files:
-        partition = ledger_file.stem
-        if partition == config.skip_year:
+    url_files = sorted(url_dir.glob("*.jsonl"), key=lambda path: path.stem, reverse=True)
+    for url_file in url_files:
+        partition = url_file.stem
+        partition_year = _partition_year(partition)
+        if partition_year is None or partition_year > config.start_year:
+            continue
+        if config.skip_year and partition == config.skip_year:
             continue
 
-        with ledger_file.open("r", encoding="utf-8") as handle:
-            for line in handle:
-                line_text = line.strip()
-                if not line_text:
+        upload_rows = _load_upload_partition_rows(upload_dir, partition)
+        with url_file.open("r", encoding="utf-8") as handle:
+            for raw_line in handle:
+                text = raw_line.strip()
+                if not text:
                     continue
                 try:
-                    record = json.loads(line_text)
+                    row = json.loads(text)
                 except json.JSONDecodeError:
                     continue
-                if not isinstance(record, dict):
+                if not isinstance(row, dict):
                     continue
 
                 report.scanned_records += 1
-                unique_code = str(record.get("unique_code") or "").strip()
-                source_url = str(record.get("source_url") or "").strip()
-                lfs_path = record.get("lfs_path")
+                unique_code = str(row.get("record_key") or row.get("unique_code") or "").strip()
+                source_url = str(row.get("source_url") or "").strip()
+                if not unique_code or unique_code in seen_codes or not source_url:
+                    continue
 
-                if not unique_code or unique_code in seen_codes:
+                upload_row = upload_rows.get(unique_code, {})
+                download_obj = upload_row.get("download") if isinstance(upload_row, dict) else {}
+                if not isinstance(download_obj, dict):
+                    download_obj = {}
+                attempts = max(0, _to_int(download_obj.get("attempts"), 0))
+                if attempts >= MAX_DOWNLOAD_ATTEMPTS:
                     continue
-                if lfs_path is not None:
-                    continue
-                if not source_url:
+
+                hf_obj = upload_row.get("hf") if isinstance(upload_row, dict) else {}
+                if not isinstance(hf_obj, dict):
+                    hf_obj = {}
+                lfs_path = hf_obj.get("path")
+                if isinstance(lfs_path, str) and lfs_path.strip():
                     continue
 
                 seen_codes.add(unique_code)
@@ -202,9 +297,14 @@ def _collect_candidates(config: DownloadPdfsConfig, report: DownloadPdfsReport) 
                         unique_code=unique_code,
                         source_url=source_url,
                         partition=partition,
+                        gr_date=str(row.get("gr_date") or "").strip(),
                     )
                 )
 
+    candidates.sort(
+        key=lambda item: (_partition_year(item.partition) or 0, item.gr_date, item.unique_code),
+        reverse=True,
+    )
     report.candidate_urls = len(candidates)
     return candidates
 
@@ -397,13 +497,15 @@ def run_download_pdfs(config: DownloadPdfsConfig) -> tuple[int, DownloadPdfsRepo
     config.downloads_dir.mkdir(parents=True, exist_ok=True)
     report = DownloadPdfsReport()
     report.stale_temp_files_deleted = _cleanup_stale_downloads(config.downloads_dir)
+    store = LedgerStore(config.ledger_dir)
 
-    candidates = _collect_candidates(config, report)
+    candidates = _collect_candidates(store=store, config=config, report=report)
     total_candidates = len(candidates)
     report.remaining_urls = total_candidates
 
     print("download-pdfs:")
     print(f"  candidate_urls: {total_candidates}")
+    print(f"  start_year: {config.start_year}")
     print(f"  skip_year: {config.skip_year}")
     print(f"  stale_temp_files_deleted: {report.stale_temp_files_deleted}")
 
@@ -426,6 +528,19 @@ def run_download_pdfs(config: DownloadPdfsConfig) -> tuple[int, DownloadPdfsRepo
 
         if report.attempted_downloads > 0:
             time.sleep(max(0.0, config.request_interval_sec))
+
+        record = store.find(candidate.unique_code)
+        if not isinstance(record, dict):
+            continue
+        current_attempts = _download_attempts(record)
+        if current_attempts >= MAX_DOWNLOAD_ATTEMPTS:
+            continue
+        attempt_number = current_attempts + 1
+        _upsert_download_attempt(
+            store=store,
+            unique_code=candidate.unique_code,
+            attempts=attempt_number,
+        )
 
         report.attempted_downloads += 1
         report.remaining_urls = total_candidates - index + 1
@@ -529,6 +644,7 @@ def run_from_args(args: argparse.Namespace) -> int:
         max_consecutive_failures=max(1, args.max_consecutive_failures),
         download_timeout_sec=max(1, args.download_timeout_sec),
         skip_year=str(args.skip_year).strip() or DEFAULT_SKIP_YEAR,
+        start_year=max(1900, args.start_year),
     )
     try:
         exit_code, report = run_download_pdfs(config)

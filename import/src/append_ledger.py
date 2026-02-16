@@ -21,7 +21,7 @@ from build_baseline_ledger import (
     update_best_row,
 )
 from department_codes import department_code_from_name
-from ledger_engine import LedgerStore
+from info_store import InfoStore as LedgerStore
 from local_env import load_local_env
 
 
@@ -55,7 +55,7 @@ class CandidateRecord:
 def configure_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.description = "Append new GR records from mahgetGR into existing ledger (append-only)."
     parser.add_argument("--mahgetgr-root", default="mahgetGR", help="Path to mahgetGR repository root")
-    parser.add_argument("--ledger-dir", default="import/grinfo", help="Ledger directory")
+    parser.add_argument("--ledger-dir", default="import/grinfo", help="Ledger root directory (supports split ledgers)")
     parser.add_argument("--dry-run", action="store_true", help="Show append counts without writing")
     return parser
 

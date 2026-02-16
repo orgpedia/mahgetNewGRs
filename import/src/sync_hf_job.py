@@ -37,7 +37,11 @@ VALID_LARGE_FOLDER_MODES = {
 }
 DEFAULT_LARGE_FOLDER_THRESHOLD = 100
 HF_REPO_PATH_PLACEHOLDER = "/absolute/path/to/local/hf-dataset-clone"
-LEDGER_EXCLUDE_PATTERNS = ("import/grinfo/**", "**/import/grinfo/**")
+LEDGER_NAMES = ("urlinfos", "uploadinfos", "pdfinfos", "grinfo")
+LEDGER_EXCLUDE_PATTERNS = tuple(
+    [f"import/{name}/**" for name in LEDGER_NAMES]
+    + [f"**/import/{name}/**" for name in LEDGER_NAMES]
+)
 HF_REPO_URL_PATTERN = re.compile(
     r"(?:https?://)?(?:www\.)?huggingface\.co/datasets/([^/?#]+/[^/?#]+)"
 )
@@ -174,7 +178,7 @@ def _contains_ledger_segment(path_text: str) -> bool:
         return False
     parts = Path(normalized).parts
     for idx in range(len(parts) - 1):
-        if parts[idx] == "import" and parts[idx + 1] == "grinfo":
+        if parts[idx] == "import" and parts[idx + 1] in LEDGER_NAMES:
             return True
     return False
 
@@ -189,9 +193,10 @@ def _iter_upload_targets(local_root: Path, include_ledger: bool) -> list[tuple[P
         if entry.name == "import":
             if not include_ledger:
                 continue
-            grinfo_path = entry / "grinfo"
-            if grinfo_path.exists():
-                targets.append((grinfo_path, "import/grinfo"))
+            for ledger_name in ("urlinfos", "uploadinfos", "pdfinfos", "grinfo"):
+                ledger_path = entry / ledger_name
+                if ledger_path.exists():
+                    targets.append((ledger_path, f"import/{ledger_name}"))
             continue
         targets.append((entry, entry.name))
     return targets
@@ -456,11 +461,20 @@ def _run_upload(config: SyncHFConfig) -> tuple[str, int]:
     if selected_files and (selected_file or selected_prefix):
         raise SyncHFError("Use only one of `--file`, `--prefix`, or multi-file upload paths.")
     if not config.include_ledger and selected_file and _contains_ledger_segment(selected_file):
-        raise SyncHFError("Ledger upload is disabled by default. Use `--include-ledger` to upload `import/grinfo`.")
+        raise SyncHFError(
+            "Ledger upload is disabled by default. "
+            "Use `--include-ledger` to upload `import/urlinfos`, `import/uploadinfos`, and `import/pdfinfos`."
+        )
     if not config.include_ledger and any(_contains_ledger_segment(path) for path in selected_files):
-        raise SyncHFError("Ledger upload is disabled by default. Use `--include-ledger` to upload `import/grinfo`.")
+        raise SyncHFError(
+            "Ledger upload is disabled by default. "
+            "Use `--include-ledger` to upload `import/urlinfos`, `import/uploadinfos`, and `import/pdfinfos`."
+        )
     if not config.include_ledger and selected_prefix and _contains_ledger_segment(selected_prefix):
-        raise SyncHFError("Ledger upload is disabled by default. Use `--include-ledger` to upload `import/grinfo`.")
+        raise SyncHFError(
+            "Ledger upload is disabled by default. "
+            "Use `--include-ledger` to upload `import/urlinfos`, `import/uploadinfos`, and `import/pdfinfos`."
+        )
 
     targets: list[tuple[Path, str]]
     if selected_files:
@@ -570,9 +584,15 @@ def _run_download(config: SyncHFConfig) -> tuple[str, int]:
     if selected_file and selected_prefix:
         raise SyncHFError("Use only one of `--file` or `--prefix`.")
     if not config.include_ledger and selected_file and _contains_ledger_segment(selected_file):
-        raise SyncHFError("Ledger download is disabled by default. Use `--include-ledger` to download `import/grinfo`.")
+        raise SyncHFError(
+            "Ledger download is disabled by default. "
+            "Use `--include-ledger` to download `import/urlinfos`, `import/uploadinfos`, and `import/pdfinfos`."
+        )
     if not config.include_ledger and selected_prefix and _contains_ledger_segment(selected_prefix):
-        raise SyncHFError("Ledger download is disabled by default. Use `--include-ledger` to download `import/grinfo`.")
+        raise SyncHFError(
+            "Ledger download is disabled by default. "
+            "Use `--include-ledger` to download `import/urlinfos`, `import/uploadinfos`, and `import/pdfinfos`."
+        )
 
     if selected_file:
         remote_files = [selected_file]
@@ -684,7 +704,7 @@ def configure_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser
     parser.add_argument(
         "--include-ledger",
         action="store_true",
-        help="Include `import/grinfo` when uploading top-level local content.",
+        help="Include ledger namespaces under `import/` (urlinfos/uploadinfos/pdfinfos).",
     )
     parser.add_argument(
         "--commit-message",

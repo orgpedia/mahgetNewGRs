@@ -44,7 +44,7 @@ class BaselineLedgerCommand(Command):
 class ValidateLedgerCommand(Command):
     name = "validate-ledger"
     help = "Validate ledger JSONL files"
-    description = "Validate import/grinfo ledger files for schema, state, and partition consistency."
+    description = "Validate split ledger files under import/{urlinfos,uploadinfos,pdfinfos}."
 
     def configure_parser(self, parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         return validate_ledger.configure_parser(parser)

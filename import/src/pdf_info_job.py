@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass
@@ -11,7 +10,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from ledger_engine import to_ledger_relative_path, utc_now_text
+from info_store import InfoStore as LedgerStore
+from ledger_engine import partition_for_gr_date, to_ledger_relative_path
 from local_env import load_local_env
 
 
@@ -65,7 +65,7 @@ def configure_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser
         "Extract PDF metadata for ledger records and store it in record.pdf_info. "
         "Includes page count, image presence, used-font word counts, language inference, and file size."
     )
-    parser.add_argument("--ledger-dir", default="import/grinfo", help="Ledger directory containing *.jsonl files")
+    parser.add_argument("--ledger-dir", default="import/grinfo", help="Ledger root directory (supports split ledgers)")
     parser.add_argument(
         "--max-records",
         type=int,
@@ -97,16 +97,6 @@ def _load_fitz() -> Any:
             raise PdfInfoDependencyError(
                 "PyMuPDF is required. Install dependency 'pymupdf' before running pdf-info."
             ) from exc
-
-
-def _atomic_write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = path.with_name(f".{path.name}.tmp")
-    with temp_path.open("w", encoding="utf-8") as handle:
-        for row in rows:
-            handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True))
-            handle.write("\n")
-    temp_path.replace(path)
 
 
 def _resolve_existing_file(path_value: Any) -> Path | None:
@@ -426,27 +416,21 @@ def _build_missing_info() -> dict[str, Any]:
     return {
         "status": "missing_pdf",
         "error": "local_pdf_not_found",
-        "path": "",
         "file_size": None,
         "page_count": None,
-        "pages_with_images": 0,
-        "has_any_page_image": False,
-        "font_count": 0,
-        "fonts": {},
-        "unresolved_word_count": 0,
-        "language": {
-            "inferred": "unknown",
-            "script_word_counts": {},
-            "total_words": 0,
-        },
+        "pages_with_images": None,
+        "has_any_page_image": None,
+        "font_count": None,
+        "fonts": None,
+        "unresolved_word_count": None,
+        "language": None,
     }
 
 
-def _build_failed_info(path: Path | None, error: str) -> dict[str, Any]:
+def _build_failed_info(error: str) -> dict[str, Any]:
     return {
         "status": "failed",
         "error": error.strip() or "pdf_info_failed",
-        "path": to_ledger_relative_path(path) if path is not None else "",
         "file_size": None,
         "page_count": None,
         "pages_with_images": 0,
@@ -484,92 +468,79 @@ def run_pdf_info(config: PdfInfoConfig) -> PdfInfoReport:
         raise FileNotFoundError(f"Ledger directory not found: {config.ledger_dir}")
 
     fitz = _load_fitz()
+    store = LedgerStore(config.ledger_dir)
     report = PdfInfoReport()
-    now_text = utc_now_text()
     max_records = max(0, config.max_records)
+    changed_partitions: set[str] = set()
 
-    for ledger_file in sorted(config.ledger_dir.glob("*.jsonl")):
-        partition = ledger_file.stem
-        rows: list[dict[str, Any]] = []
-        file_changed = False
+    for record in store.iter_records():
+        unique_code = str(record.get("unique_code") or "").strip()
+        partition = partition_for_gr_date(record.get("gr_date"))
+        label = _record_label(partition, unique_code)
+        report.scanned_records += 1
 
-        with ledger_file.open("r", encoding="utf-8") as handle:
-            for line in handle:
-                text = line.strip()
-                if not text:
-                    continue
-                obj = json.loads(text)
-                if not isinstance(obj, dict):
-                    continue
+        if max_records > 0 and report.processed_records >= max_records:
+            _verbose_log(config, f"[skip limit] {label}")
+            continue
 
-                unique_code = str(obj.get("unique_code") or "").strip()
-                label = _record_label(partition, unique_code)
-                report.scanned_records += 1
-                if max_records > 0 and report.processed_records >= max_records:
-                    _verbose_log(config, f"[skip limit] {label}")
-                    rows.append(obj)
-                    continue
+        if not unique_code:
+            _verbose_log(config, f"[skip invalid] {label}")
+            continue
 
-                current_pdf_info = obj.get("pdf_info")
-                if not config.force and _is_success_pdf_info(current_pdf_info):
-                    report.skipped_already_success += 1
-                    _verbose_log(config, f"[skip success] {label}")
-                    rows.append(obj)
-                    continue
+        current_pdf_info = record.get("pdf_info")
+        if not config.force and _is_success_pdf_info(current_pdf_info):
+            report.skipped_already_success += 1
+            _verbose_log(config, f"[skip success] {label}")
+            continue
 
-                pdf_path = _resolve_pdf_path(obj)
-                if pdf_path is None:
-                    report.skipped_no_local_pdf += 1
-                    if not config.mark_missing:
-                        _verbose_log(config, f"[skip no-pdf] {label}")
-                        rows.append(obj)
-                        continue
-                    _verbose_log(config, f"[mark missing] {label}")
-                    next_pdf_info = _build_missing_info()
-                else:
-                    _verbose_log(config, f"[process] {label} path={to_ledger_relative_path(pdf_path)}")
-                    try:
-                        next_pdf_info = extract_pdf_info(pdf_path=pdf_path, fitz=fitz)
-                        language = next_pdf_info.get("language", {})
-                        inferred = ""
-                        if isinstance(language, dict):
-                            inferred = str(language.get("inferred") or "")
-                        _verbose_log(
-                            config,
-                            (
-                                f"[extracted] {label} pages={next_pdf_info.get('page_count')} "
-                                f"images={next_pdf_info.get('pages_with_images')} "
-                                f"fonts={next_pdf_info.get('font_count')} "
-                                f"words={language.get('total_words') if isinstance(language, dict) else ''} "
-                                f"lang={inferred or 'unknown'}"
-                            ),
-                        )
-                    except Exception as exc:
-                        report.extraction_failed += 1
-                        _verbose_log(config, f"[failed] {label} error={exc}")
-                        next_pdf_info = _build_failed_info(pdf_path, str(exc))
+        pdf_path = _resolve_pdf_path(record)
+        if pdf_path is None:
+            report.skipped_no_local_pdf += 1
+            if not config.mark_missing:
+                _verbose_log(config, f"[skip no-pdf] {label}")
+                continue
+            _verbose_log(config, f"[mark missing] {label}")
+            next_pdf_info = _build_missing_info()
+        else:
+            _verbose_log(config, f"[process] {label} path={to_ledger_relative_path(pdf_path)}")
+            try:
+                next_pdf_info = extract_pdf_info(pdf_path=pdf_path, fitz=fitz)
+                language = next_pdf_info.get("language", {})
+                inferred = ""
+                if isinstance(language, dict):
+                    inferred = str(language.get("inferred") or "")
+                _verbose_log(
+                    config,
+                    (
+                        f"[extracted] {label} pages={next_pdf_info.get('page_count')} "
+                        f"images={next_pdf_info.get('pages_with_images')} "
+                        f"fonts={next_pdf_info.get('font_count')} "
+                        f"words={language.get('total_words') if isinstance(language, dict) else ''} "
+                        f"lang={inferred or 'unknown'}"
+                    ),
+                )
+            except Exception as exc:
+                report.extraction_failed += 1
+                _verbose_log(config, f"[failed] {label} error={exc}")
+                next_pdf_info = _build_failed_info(str(exc))
 
-                report.processed_records += 1
-                if current_pdf_info == next_pdf_info:
-                    report.unchanged_records += 1
-                    _verbose_log(config, f"[unchanged] {label}")
-                    rows.append(obj)
-                    continue
+        report.processed_records += 1
+        if current_pdf_info == next_pdf_info:
+            report.unchanged_records += 1
+            _verbose_log(config, f"[unchanged] {label}")
+            continue
 
-                report.updated_records += 1
-                if not config.dry_run:
-                    obj["pdf_info"] = next_pdf_info
-                    obj["updated_at_utc"] = now_text
-                    file_changed = True
-                    _verbose_log(config, f"[updated] {label}")
-                else:
-                    _verbose_log(config, f"[dry-run update] {label}")
-                rows.append(obj)
+        report.updated_records += 1
+        if config.dry_run:
+            _verbose_log(config, f"[dry-run update] {label}")
+            continue
 
-        if file_changed:
-            report.partitions_changed += 1
-            if not config.dry_run:
-                _atomic_write_jsonl(ledger_file, rows)
+        result = store.upsert({"unique_code": unique_code, "pdf_info": next_pdf_info})
+        changed_partitions.add(result.partition)
+        _verbose_log(config, f"[updated] {label}")
+
+    if not config.dry_run:
+        report.partitions_changed = len(changed_partitions)
 
     return report
 

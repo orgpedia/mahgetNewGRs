@@ -13,7 +13,8 @@ from pathlib import Path
 from typing import Any
 
 from department_codes import department_code_from_name
-from ledger_engine import LedgerStore, to_ledger_relative_path
+from info_store import InfoStore as LedgerStore
+from ledger_engine import to_ledger_relative_path
 from local_env import load_local_env
 from sync_hf_job import SyncHFConfig, SyncHFError, resolve_hf_repo_path, run_sync_hf
 
@@ -232,7 +233,7 @@ def configure_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser
         "Import existing PDF files into LFS/pdfs/<department>/<YYYY-MM>/<unique_code>.pdf and optionally sync to HF."
     )
     parser.add_argument("--source-dir", required=True, help="Directory containing PDF files to import")
-    parser.add_argument("--ledger-dir", default="import/grinfo", help="Ledger directory for department and gr_date lookup")
+    parser.add_argument("--ledger-dir", default="import/grinfo", help="Ledger root directory for department and gr_date lookup")
     parser.add_argument("--lfs-pdf-root", default="LFS/pdfs", help="LFS PDF root directory")
     parser.add_argument("--no-recursive", action="store_true", help="Do not recurse under source directory")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite destination PDF when hashes differ")

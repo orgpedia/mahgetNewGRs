@@ -13,6 +13,11 @@ from typing import Any
 from local_env import load_local_env
 
 
+URL_NS = "urlinfos"
+UPLOAD_NS = "uploadinfos"
+PDF_NS = "pdfinfos"
+NAMESPACES = (URL_NS, UPLOAD_NS, PDF_NS)
+
 ALLOWED_STATES = {
     "FETCHED",
     "DOWNLOAD_SUCCESS",
@@ -24,19 +29,14 @@ ALLOWED_STATES = {
     "ARCHIVE_UPLOADED_WITHOUT_DOCUMENT",
 }
 
-REQUIRED_TOP_LEVEL_FIELDS = {
+URL_REQUIRED_FIELDS = {
+    "record_key",
     "unique_code",
     "title",
     "department_name",
     "department_code",
     "gr_date",
     "source_url",
-    "lfs_path",
-    "state",
-    "attempt_counts",
-    "download",
-    "wayback",
-    "archive",
     "first_seen_crawl_date",
     "last_seen_crawl_date",
     "first_seen_run_type",
@@ -44,9 +44,27 @@ REQUIRED_TOP_LEVEL_FIELDS = {
     "updated_at_utc",
 }
 
-EXPECTED_ATTEMPT_FIELDS = {"download", "wayback", "archive"}
-EXPECTED_DOWNLOAD_FIELDS = {"path", "status", "hash", "size", "error"}
+UPLOAD_REQUIRED_FIELDS = {
+    "record_key",
+    "state",
+    "download",
+    "wayback",
+    "archive",
+    "hf",
+    "created_at_utc",
+    "updated_at_utc",
+}
+
+PDF_REQUIRED_FIELDS = {
+    "record_key",
+    "status",
+    "created_at_utc",
+    "updated_at_utc",
+}
+
+EXPECTED_DOWNLOAD_FIELDS = {"status", "error", "attempts"}
 EXPECTED_WAYBACK_FIELDS = {
+    "status",
     "url",
     "content_url",
     "archive_time",
@@ -54,14 +72,20 @@ EXPECTED_WAYBACK_FIELDS = {
     "archive_length",
     "archive_mimetype",
     "archive_status_code",
-    "status",
     "error",
+    "attempts",
 }
-EXPECTED_ARCHIVE_FIELDS = {"identifier", "url", "status", "error"}
-EXPECTED_PDF_INFO_FIELDS = {
-    "status",
-    "error",
-    "path",
+EXPECTED_ARCHIVE_FIELDS = {"status", "identifier", "url", "error", "attempts"}
+EXPECTED_HF_FIELDS = {"status", "path", "hash", "backend", "commit_hash", "error", "synced_at_utc", "attempts"}
+
+ALLOWED_DOWNLOAD_STATUS = {"not_attempted", "attempted", "success", "failed"}
+ALLOWED_WAYBACK_STATUS = {"not_attempted", "success", "failed"}
+ALLOWED_ARCHIVE_STATUS = {"not_attempted", "success", "failed"}
+ALLOWED_HF_STATUS = {"not_attempted", "success", "failed"}
+ALLOWED_PDF_STATUS = {"not_attempted", "success", "failed", "missing_pdf"}
+
+PDF_NON_ATTEMPTED_ALLOWED_FIELDS = PDF_REQUIRED_FIELDS
+PDF_EXTRACTED_FIELDS = {
     "file_size",
     "page_count",
     "pages_with_images",
@@ -71,11 +95,7 @@ EXPECTED_PDF_INFO_FIELDS = {
     "unresolved_word_count",
     "language",
 }
-
-ALLOWED_DOWNLOAD_STATUS = {"not_attempted", "attempted", "success", "failed"}
-ALLOWED_WAYBACK_STATUS = {"not_attempted", "success", "failed"}
-ALLOWED_ARCHIVE_STATUS = {"not_attempted", "success", "failed"}
-ALLOWED_PDF_INFO_STATUS = {"not_attempted", "success", "failed", "missing_pdf"}
+PDF_NON_ATTEMPTED_REQUIRED_FIELDS = {"error"} | PDF_EXTRACTED_FIELDS
 
 
 @dataclass
@@ -87,9 +107,18 @@ class Issue:
     line_no: int
 
 
+@dataclass(frozen=True)
+class RowRef:
+    namespace: str
+    partition: str
+    file_path: Path
+    line_no: int
+    row: dict[str, Any]
+
+
 def configure_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
-    parser.description = "Validate yearly ledger JSONL files in import/grinfo."
-    parser.add_argument("--ledger-dir", default="import/grinfo", help="Ledger directory containing *.jsonl files")
+    parser.description = "Validate split ledger JSONL files in import/{urlinfos,uploadinfos,pdfinfos}."
+    parser.add_argument("--ledger-dir", default="import/grinfo", help="Ledger root or any ledger namespace directory")
     parser.add_argument(
         "--max-issues-per-code",
         type=int,
@@ -105,12 +134,33 @@ def configure_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Validate yearly ledger JSONL files in import/grinfo.")
+    parser = argparse.ArgumentParser(
+        description="Validate split ledger JSONL files in import/{urlinfos,uploadinfos,pdfinfos}."
+    )
     return configure_parser(parser)
 
 
 def parse_args() -> argparse.Namespace:
     return build_parser().parse_args()
+
+
+def _sort_partition_key(name: str) -> tuple[int, int, str]:
+    if name.isdigit():
+        return (0, int(name), name)
+    if name == "unknown":
+        return (2, 0, name)
+    return (1, 0, name)
+
+
+def resolve_ledger_root(path: Path) -> Path:
+    requested = path.resolve()
+    if any((requested / ns).exists() for ns in NAMESPACES):
+        return requested
+    if requested.name in set(NAMESPACES) | {"grinfo"}:
+        parent = requested.parent
+        if any((parent / ns).exists() for ns in NAMESPACES):
+            return parent
+    return requested
 
 
 def add_issue(
@@ -158,7 +208,32 @@ def parse_iso_timestamp(value: Any) -> datetime | None:
         return None
 
 
+def is_ascii_text(value: str) -> bool:
+    try:
+        value.encode("ascii")
+        return True
+    except UnicodeEncodeError:
+        return False
+
+
+def validate_partition_name(partition: str, issues: list[Issue], file_path: Path, line_no: int) -> bool:
+    if partition == "unknown":
+        return True
+    if len(partition) == 4 and partition.isdigit():
+        return True
+    add_issue(
+        issues,
+        "error",
+        "invalid_partition_filename",
+        f"Invalid partition filename: {file_path.name}",
+        file_path,
+        line_no,
+    )
+    return False
+
+
 def validate_partition_against_gr_date(
+    *,
     partition_key: str,
     gr_date_value: Any,
     issues: list[Issue],
@@ -200,179 +275,312 @@ def validate_partition_against_gr_date(
         )
 
 
-def validate_attempt_counts(
-    attempts: Any,
+def validate_required_fields(
+    *,
+    row: dict[str, Any],
+    required_fields: set[str],
+    issues: list[Issue],
+    file_path: Path,
+    line_no: int,
+    namespace: str,
+) -> bool:
+    missing_fields = sorted(required_fields - set(row.keys()))
+    if not missing_fields:
+        return True
+    add_issue(
+        issues,
+        "error",
+        "record_missing_required_fields",
+        f"{namespace} missing required fields: {missing_fields}",
+        file_path,
+        line_no,
+    )
+    return False
+
+
+def validate_record_key(
+    *,
+    row: dict[str, Any],
+    issues: list[Issue],
+    file_path: Path,
+    line_no: int,
+) -> str:
+    record_key = row.get("record_key")
+    if not isinstance(record_key, str) or not record_key.strip():
+        add_issue(
+            issues,
+            "error",
+            "record_key_invalid",
+            f"Invalid record_key={record_key!r}",
+            file_path,
+            line_no,
+        )
+        return ""
+    record_key = record_key.strip()
+    if not is_ascii_text(record_key):
+        add_issue(
+            issues,
+            "error",
+            "record_key_non_ascii",
+            f"record_key must be ASCII-only, got {record_key!r}",
+            file_path,
+            line_no,
+        )
+    return record_key
+
+
+def validate_timestamps(
+    *,
+    row: dict[str, Any],
     issues: list[Issue],
     file_path: Path,
     line_no: int,
 ) -> None:
-    if not isinstance(attempts, dict):
+    created_at = parse_iso_timestamp(row.get("created_at_utc"))
+    updated_at = parse_iso_timestamp(row.get("updated_at_utc"))
+    if created_at is None:
         add_issue(
             issues,
             "error",
-            "attempt_counts_not_object",
-            "attempt_counts must be an object",
+            "created_at_invalid",
+            f"Invalid created_at_utc={row.get('created_at_utc')!r}",
             file_path,
             line_no,
         )
-        return
-
-    missing_keys = sorted(EXPECTED_ATTEMPT_FIELDS - set(attempts.keys()))
-    if missing_keys:
+    if updated_at is None:
         add_issue(
             issues,
             "error",
-            "attempt_counts_missing_keys",
-            f"attempt_counts missing keys: {missing_keys}",
+            "updated_at_invalid",
+            f"Invalid updated_at_utc={row.get('updated_at_utc')!r}",
             file_path,
             line_no,
         )
-
-    for key in EXPECTED_ATTEMPT_FIELDS:
-        value = attempts.get(key)
-        if not isinstance(value, int):
-            add_issue(
-                issues,
-                "error",
-                "attempt_counts_invalid_type",
-                f"attempt_counts.{key} must be int, got {type(value).__name__}",
-                file_path,
-                line_no,
-            )
-            continue
-        if value < 0 or value > 2:
-            add_issue(
-                issues,
-                "error",
-                "attempt_counts_out_of_range",
-                f"attempt_counts.{key} must be in [0,2], got {value}",
-                file_path,
-                line_no,
-            )
-
-
-def validate_stage_objects(
-    record: dict[str, Any],
-    issues: list[Issue],
-    file_path: Path,
-    line_no: int,
-) -> None:
-    download = record.get("download")
-    wayback = record.get("wayback")
-    archive = record.get("archive")
-
-    if not isinstance(download, dict):
-        add_issue(issues, "error", "download_not_object", "download must be object", file_path, line_no)
-    if not isinstance(wayback, dict):
-        add_issue(issues, "error", "wayback_not_object", "wayback must be object", file_path, line_no)
-    if not isinstance(archive, dict):
-        add_issue(issues, "error", "archive_not_object", "archive must be object", file_path, line_no)
-    if not isinstance(download, dict) or not isinstance(wayback, dict) or not isinstance(archive, dict):
-        return
-
-    missing_download = sorted(EXPECTED_DOWNLOAD_FIELDS - set(download.keys()))
-    if missing_download:
+    if created_at and updated_at and created_at > updated_at:
         add_issue(
             issues,
             "warning",
-            "download_missing_keys",
-            f"download missing keys: {missing_download}",
-            file_path,
-            line_no,
-        )
-
-    missing_wayback = sorted(EXPECTED_WAYBACK_FIELDS - set(wayback.keys()))
-    if missing_wayback:
-        add_issue(
-            issues,
-            "warning",
-            "wayback_missing_keys",
-            f"wayback missing keys: {missing_wayback}",
-            file_path,
-            line_no,
-        )
-
-    missing_archive = sorted(EXPECTED_ARCHIVE_FIELDS - set(archive.keys()))
-    if missing_archive:
-        add_issue(
-            issues,
-            "warning",
-            "archive_missing_keys",
-            f"archive missing keys: {missing_archive}",
-            file_path,
-            line_no,
-        )
-
-    download_status = download.get("status")
-    wayback_status = wayback.get("status")
-    archive_status = archive.get("status")
-
-    if download_status not in ALLOWED_DOWNLOAD_STATUS:
-        add_issue(
-            issues,
-            "error",
-            "download_status_invalid",
-            f"download.status={download_status!r} is invalid",
-            file_path,
-            line_no,
-        )
-    if wayback_status not in ALLOWED_WAYBACK_STATUS:
-        add_issue(
-            issues,
-            "error",
-            "wayback_status_invalid",
-            f"wayback.status={wayback_status!r} is invalid",
-            file_path,
-            line_no,
-        )
-    if archive_status not in ALLOWED_ARCHIVE_STATUS:
-        add_issue(
-            issues,
-            "error",
-            "archive_status_invalid",
-            f"archive.status={archive_status!r} is invalid",
+            "created_after_updated",
+            f"created_at_utc={created_at} > updated_at_utc={updated_at}",
             file_path,
             line_no,
         )
 
 
-def validate_lfs_path(
-    record: dict[str, Any],
+def validate_url_row(
+    *,
+    partition: str,
+    row: dict[str, Any],
     issues: list[Issue],
     file_path: Path,
     line_no: int,
 ) -> None:
-    value = record.get("lfs_path")
-    if value is None:
+    if not validate_required_fields(
+        row=row,
+        required_fields=URL_REQUIRED_FIELDS,
+        issues=issues,
+        file_path=file_path,
+        line_no=line_no,
+        namespace=URL_NS,
+    ):
         return
-    if not isinstance(value, str):
+
+    record_key = validate_record_key(row=row, issues=issues, file_path=file_path, line_no=line_no)
+    unique_code = row.get("unique_code")
+    if not isinstance(unique_code, str) or not unique_code.strip():
         add_issue(
             issues,
             "error",
-            "lfs_path_invalid_type",
-            f"lfs_path must be string or null, got {type(value).__name__}",
+            "unique_code_invalid",
+            f"Invalid unique_code={unique_code!r}",
             file_path,
             line_no,
         )
-        return
-    if not value.strip():
+    elif record_key and unique_code.strip() != record_key:
         add_issue(
             issues,
             "error",
-            "lfs_path_empty_string",
-            "lfs_path must be null when file is unavailable, not empty string",
+            "record_key_unique_code_mismatch",
+            f"record_key={record_key!r} must equal unique_code={unique_code!r} in {URL_NS}",
             file_path,
             line_no,
         )
 
+    source_url = row.get("source_url")
+    if not isinstance(source_url, str) or not source_url.strip():
+        add_issue(
+            issues,
+            "warning",
+            "source_url_empty",
+            "source_url is empty",
+            file_path,
+            line_no,
+        )
 
-def validate_state_consistency(
-    record: dict[str, Any],
+    department_code = row.get("department_code")
+    if not isinstance(department_code, str) or not department_code.strip():
+        add_issue(
+            issues,
+            "error",
+            "department_code_invalid",
+            f"Invalid department_code={department_code!r}",
+            file_path,
+            line_no,
+        )
+    elif department_code != "unknown" and not department_code.startswith("mah"):
+        add_issue(
+            issues,
+            "warning",
+            "department_code_non_canonical",
+            f"department_code={department_code!r} is not canonical mah* code",
+            file_path,
+            line_no,
+        )
+
+    validate_partition_against_gr_date(
+        partition_key=partition,
+        gr_date_value=row.get("gr_date"),
+        issues=issues,
+        file_path=file_path,
+        line_no=line_no,
+    )
+
+    first_seen = parse_iso_date(row.get("first_seen_crawl_date"))
+    last_seen = parse_iso_date(row.get("last_seen_crawl_date"))
+    if first_seen is None:
+        add_issue(
+            issues,
+            "error",
+            "first_seen_crawl_date_invalid",
+            f"Invalid first_seen_crawl_date={row.get('first_seen_crawl_date')!r}",
+            file_path,
+            line_no,
+        )
+    if last_seen is None:
+        add_issue(
+            issues,
+            "error",
+            "last_seen_crawl_date_invalid",
+            f"Invalid last_seen_crawl_date={row.get('last_seen_crawl_date')!r}",
+            file_path,
+            line_no,
+        )
+    if first_seen and last_seen and first_seen > last_seen:
+        add_issue(
+            issues,
+            "error",
+            "crawl_date_order_invalid",
+            f"first_seen_crawl_date={first_seen} > last_seen_crawl_date={last_seen}",
+            file_path,
+            line_no,
+        )
+
+    run_type = row.get("first_seen_run_type")
+    if run_type not in {"daily", "monthly"}:
+        add_issue(
+            issues,
+            "error",
+            "first_seen_run_type_invalid",
+            f"Invalid first_seen_run_type={run_type!r}",
+            file_path,
+            line_no,
+        )
+
+    validate_timestamps(row=row, issues=issues, file_path=file_path, line_no=line_no)
+
+
+def validate_attempt_field(
+    *,
+    stage_obj: dict[str, Any],
+    stage_name: str,
     issues: list[Issue],
     file_path: Path,
     line_no: int,
 ) -> None:
-    state = record.get("state")
+    attempts = stage_obj.get("attempts")
+    if not isinstance(attempts, int):
+        add_issue(
+            issues,
+            "error",
+            "attempts_invalid_type",
+            f"{stage_name}.attempts must be int, got {type(attempts).__name__}",
+            file_path,
+            line_no,
+        )
+        return
+    if attempts < 0:
+        add_issue(
+            issues,
+            "error",
+            "attempts_negative",
+            f"{stage_name}.attempts must be >= 0, got {attempts}",
+            file_path,
+            line_no,
+        )
+
+
+def validate_stage_object(
+    *,
+    row: dict[str, Any],
+    stage_name: str,
+    expected_fields: set[str],
+    allowed_status: set[str],
+    issues: list[Issue],
+    file_path: Path,
+    line_no: int,
+) -> dict[str, Any] | None:
+    value = row.get(stage_name)
+    if not isinstance(value, dict):
+        add_issue(
+            issues,
+            "error",
+            f"{stage_name}_not_object",
+            f"{stage_name} must be object",
+            file_path,
+            line_no,
+        )
+        return None
+
+    missing_fields = sorted(expected_fields - set(value.keys()))
+    if missing_fields:
+        add_issue(
+            issues,
+            "warning",
+            f"{stage_name}_missing_keys",
+            f"{stage_name} missing keys: {missing_fields}",
+            file_path,
+            line_no,
+        )
+
+    status = value.get("status")
+    if status not in allowed_status:
+        add_issue(
+            issues,
+            "error",
+            f"{stage_name}_status_invalid",
+            f"{stage_name}.status={status!r} is invalid",
+            file_path,
+            line_no,
+        )
+
+    validate_attempt_field(
+        stage_obj=value,
+        stage_name=stage_name,
+        issues=issues,
+        file_path=file_path,
+        line_no=line_no,
+    )
+    return value
+
+
+def validate_upload_state_consistency(
+    *,
+    row: dict[str, Any],
+    issues: list[Issue],
+    file_path: Path,
+    line_no: int,
+) -> None:
+    state = row.get("state")
     if state not in ALLOWED_STATES:
         add_issue(
             issues,
@@ -384,9 +592,9 @@ def validate_state_consistency(
         )
         return
 
-    download = record.get("download", {})
-    wayback = record.get("wayback", {})
-    archive = record.get("archive", {})
+    download = row.get("download", {})
+    wayback = row.get("wayback", {})
+    archive = row.get("archive", {})
     download_status = download.get("status")
     wayback_status = wayback.get("status")
     archive_status = archive.get("status")
@@ -553,229 +761,278 @@ def validate_state_consistency(
             )
 
 
-def validate_pdf_info(
-    record: dict[str, Any],
+def validate_upload_row(
+    *,
+    row: dict[str, Any],
     issues: list[Issue],
     file_path: Path,
     line_no: int,
 ) -> None:
-    if "pdf_info" not in record:
+    if not validate_required_fields(
+        row=row,
+        required_fields=UPLOAD_REQUIRED_FIELDS,
+        issues=issues,
+        file_path=file_path,
+        line_no=line_no,
+        namespace=UPLOAD_NS,
+    ):
         return
 
-    pdf_info = record.get("pdf_info")
-    if not isinstance(pdf_info, dict):
+    validate_record_key(row=row, issues=issues, file_path=file_path, line_no=line_no)
+    if "unique_code" in row:
         add_issue(
             issues,
             "error",
-            "pdf_info_not_object",
-            f"pdf_info must be object when present, got {type(pdf_info).__name__}",
+            "uploadinfos_has_unique_code",
+            "uploadinfos row must not contain unique_code",
             file_path,
             line_no,
         )
+    if "attempt_counts" in row:
+        add_issue(
+            issues,
+            "error",
+            "uploadinfos_has_top_level_attempt_counts",
+            "uploadinfos row must not contain top-level attempt_counts",
+            file_path,
+            line_no,
+        )
+
+    validate_stage_object(
+        row=row,
+        stage_name="download",
+        expected_fields=EXPECTED_DOWNLOAD_FIELDS,
+        allowed_status=ALLOWED_DOWNLOAD_STATUS,
+        issues=issues,
+        file_path=file_path,
+        line_no=line_no,
+    )
+    validate_stage_object(
+        row=row,
+        stage_name="wayback",
+        expected_fields=EXPECTED_WAYBACK_FIELDS,
+        allowed_status=ALLOWED_WAYBACK_STATUS,
+        issues=issues,
+        file_path=file_path,
+        line_no=line_no,
+    )
+    validate_stage_object(
+        row=row,
+        stage_name="archive",
+        expected_fields=EXPECTED_ARCHIVE_FIELDS,
+        allowed_status=ALLOWED_ARCHIVE_STATUS,
+        issues=issues,
+        file_path=file_path,
+        line_no=line_no,
+    )
+    validate_stage_object(
+        row=row,
+        stage_name="hf",
+        expected_fields=EXPECTED_HF_FIELDS,
+        allowed_status=ALLOWED_HF_STATUS,
+        issues=issues,
+        file_path=file_path,
+        line_no=line_no,
+    )
+
+    validate_upload_state_consistency(row=row, issues=issues, file_path=file_path, line_no=line_no)
+    validate_timestamps(row=row, issues=issues, file_path=file_path, line_no=line_no)
+
+
+def validate_pdf_row(
+    *,
+    row: dict[str, Any],
+    issues: list[Issue],
+    file_path: Path,
+    line_no: int,
+) -> None:
+    if not validate_required_fields(
+        row=row,
+        required_fields=PDF_REQUIRED_FIELDS,
+        issues=issues,
+        file_path=file_path,
+        line_no=line_no,
+        namespace=PDF_NS,
+    ):
         return
 
-    missing_pdf_info_keys = sorted(EXPECTED_PDF_INFO_FIELDS - set(pdf_info.keys()))
-    if missing_pdf_info_keys:
+    validate_record_key(row=row, issues=issues, file_path=file_path, line_no=line_no)
+    if "unique_code" in row:
+        add_issue(
+            issues,
+            "error",
+            "pdfinfos_has_unique_code",
+            "pdfinfos row must not contain unique_code",
+            file_path,
+            line_no,
+        )
+
+    status = row.get("status")
+    if status not in ALLOWED_PDF_STATUS:
+        add_issue(
+            issues,
+            "error",
+            "pdf_status_invalid",
+            f"pdf status={status!r} is invalid",
+            file_path,
+            line_no,
+        )
+        validate_timestamps(row=row, issues=issues, file_path=file_path, line_no=line_no)
+        return
+
+    if status == "not_attempted":
+        extra_fields = sorted(set(row.keys()) - PDF_NON_ATTEMPTED_ALLOWED_FIELDS)
+        if extra_fields:
+            add_issue(
+                issues,
+                "error",
+                "pdf_not_attempted_has_extra_fields",
+                f"pdfinfos status=not_attempted must not include extra fields: {extra_fields}",
+                file_path,
+                line_no,
+            )
+        validate_timestamps(row=row, issues=issues, file_path=file_path, line_no=line_no)
+        return
+
+    missing_non_attempted = sorted(PDF_NON_ATTEMPTED_REQUIRED_FIELDS - set(row.keys()))
+    if missing_non_attempted:
         add_issue(
             issues,
             "warning",
-            "pdf_info_missing_keys",
-            f"pdf_info missing keys: {missing_pdf_info_keys}",
+            "pdf_non_attempted_missing_fields",
+            f"pdfinfos status={status} missing fields: {missing_non_attempted}",
             file_path,
             line_no,
         )
 
-    status = pdf_info.get("status")
-    if status not in ALLOWED_PDF_INFO_STATUS:
+    error_value = row.get("error")
+    if error_value is not None and not isinstance(error_value, str):
         add_issue(
             issues,
-            "error",
-            "pdf_info_status_invalid",
-            f"pdf_info.status={status!r} is invalid",
+            "warning",
+            "pdf_error_invalid_type",
+            f"pdf error should be string or null, got {type(error_value).__name__}",
             file_path,
             line_no,
         )
 
-    file_size = pdf_info.get("file_size")
+    file_size = row.get("file_size")
     if file_size is not None and not isinstance(file_size, int):
         add_issue(
             issues,
             "error",
-            "pdf_info_file_size_invalid_type",
-            f"pdf_info.file_size must be int or null, got {type(file_size).__name__}",
+            "pdf_file_size_invalid_type",
+            f"file_size must be int or null, got {type(file_size).__name__}",
             file_path,
             line_no,
         )
 
-    page_count = pdf_info.get("page_count")
+    page_count = row.get("page_count")
     if page_count is not None and not isinstance(page_count, int):
         add_issue(
             issues,
             "error",
-            "pdf_info_page_count_invalid_type",
-            f"pdf_info.page_count must be int or null, got {type(page_count).__name__}",
+            "pdf_page_count_invalid_type",
+            f"page_count must be int or null, got {type(page_count).__name__}",
             file_path,
             line_no,
         )
 
-    pages_with_images = pdf_info.get("pages_with_images")
+    pages_with_images = row.get("pages_with_images")
     if pages_with_images is not None and not isinstance(pages_with_images, int):
         add_issue(
             issues,
             "warning",
-            "pdf_info_pages_with_images_invalid_type",
-            (
-                "pdf_info.pages_with_images should be int or null, "
-                f"got {type(pages_with_images).__name__}"
-            ),
+            "pdf_pages_with_images_invalid_type",
+            f"pages_with_images should be int or null, got {type(pages_with_images).__name__}",
             file_path,
             line_no,
         )
 
-    has_any_page_image = pdf_info.get("has_any_page_image")
+    has_any_page_image = row.get("has_any_page_image")
     if has_any_page_image is not None and not isinstance(has_any_page_image, bool):
         add_issue(
             issues,
             "warning",
-            "pdf_info_has_any_page_image_invalid_type",
-            (
-                "pdf_info.has_any_page_image should be bool or null, "
-                f"got {type(has_any_page_image).__name__}"
-            ),
+            "pdf_has_any_page_image_invalid_type",
+            f"has_any_page_image should be bool or null, got {type(has_any_page_image).__name__}",
             file_path,
             line_no,
         )
 
-    fonts = pdf_info.get("fonts")
+    fonts = row.get("fonts")
     if fonts is not None and not isinstance(fonts, dict):
         add_issue(
             issues,
             "warning",
-            "pdf_info_fonts_invalid_type",
-            f"pdf_info.fonts should be object, got {type(fonts).__name__}",
+            "pdf_fonts_invalid_type",
+            f"fonts should be object or null, got {type(fonts).__name__}",
             file_path,
             line_no,
         )
 
-    language = pdf_info.get("language")
+    language = row.get("language")
     if language is not None and not isinstance(language, dict):
         add_issue(
             issues,
             "warning",
-            "pdf_info_language_invalid_type",
-            f"pdf_info.language should be object, got {type(language).__name__}",
+            "pdf_language_invalid_type",
+            f"language should be object or null, got {type(language).__name__}",
             file_path,
             line_no,
         )
 
+    if status == "missing_pdf":
+        for field_name in sorted(PDF_EXTRACTED_FIELDS):
+            if row.get(field_name) is not None:
+                add_issue(
+                    issues,
+                    "error",
+                    "pdf_missing_pdf_non_null_metadata",
+                    f"status=missing_pdf requires {field_name}=null, got {row.get(field_name)!r}",
+                    file_path,
+                    line_no,
+                )
 
-def validate_dates_and_timestamps(
-    record: dict[str, Any],
+    validate_timestamps(row=row, issues=issues, file_path=file_path, line_no=line_no)
+
+
+def validate_namespace_rows(
+    *,
+    root_dir: Path,
+    namespace: str,
     issues: list[Issue],
-    file_path: Path,
-    line_no: int,
-) -> None:
-    first_seen = parse_iso_date(record.get("first_seen_crawl_date"))
-    last_seen = parse_iso_date(record.get("last_seen_crawl_date"))
-    if first_seen is None:
+    state_counts: Counter,
+) -> tuple[dict[str, RowRef], int]:
+    namespace_dir = root_dir / namespace
+    if not namespace_dir.exists() or not namespace_dir.is_dir():
         add_issue(
             issues,
             "error",
-            "first_seen_crawl_date_invalid",
-            f"Invalid first_seen_crawl_date={record.get('first_seen_crawl_date')!r}",
-            file_path,
-            line_no,
+            "namespace_missing",
+            f"Missing namespace directory: {namespace_dir}",
+            namespace_dir,
+            0,
         )
-    if last_seen is None:
-        add_issue(
-            issues,
-            "error",
-            "last_seen_crawl_date_invalid",
-            f"Invalid last_seen_crawl_date={record.get('last_seen_crawl_date')!r}",
-            file_path,
-            line_no,
-        )
-    if first_seen and last_seen and first_seen > last_seen:
-        add_issue(
-            issues,
-            "error",
-            "crawl_date_order_invalid",
-            f"first_seen_crawl_date={first_seen} > last_seen_crawl_date={last_seen}",
-            file_path,
-            line_no,
-        )
+        return {}, 0
 
-    run_type = record.get("first_seen_run_type")
-    if run_type not in {"daily", "monthly"}:
-        add_issue(
-            issues,
-            "error",
-            "first_seen_run_type_invalid",
-            f"Invalid first_seen_run_type={run_type!r}",
-            file_path,
-            line_no,
-        )
-
-    created_at = parse_iso_timestamp(record.get("created_at_utc"))
-    updated_at = parse_iso_timestamp(record.get("updated_at_utc"))
-    if created_at is None:
-        add_issue(
-            issues,
-            "error",
-            "created_at_invalid",
-            f"Invalid created_at_utc={record.get('created_at_utc')!r}",
-            file_path,
-            line_no,
-        )
-    if updated_at is None:
-        add_issue(
-            issues,
-            "error",
-            "updated_at_invalid",
-            f"Invalid updated_at_utc={record.get('updated_at_utc')!r}",
-            file_path,
-            line_no,
-        )
-    if created_at and updated_at and created_at > updated_at:
-        add_issue(
-            issues,
-            "warning",
-            "created_after_updated",
-            f"created_at_utc={created_at} > updated_at_utc={updated_at}",
-            file_path,
-            line_no,
-        )
-
-
-def validate_ledger(ledger_dir: Path) -> tuple[list[Issue], Counter, int]:
-    issues: list[Issue] = []
-    state_counts: Counter = Counter()
-    duplicate_tracker: dict[str, tuple[Path, int]] = {}
+    rows_by_key: dict[str, RowRef] = {}
     total_records = 0
-
-    jsonl_files = sorted(ledger_dir.glob("*.jsonl"))
+    jsonl_files = sorted(namespace_dir.glob("*.jsonl"), key=lambda item: _sort_partition_key(item.stem))
     if not jsonl_files:
         add_issue(
             issues,
             "error",
-            "ledger_files_missing",
-            f"No *.jsonl files found in {ledger_dir}",
-            ledger_dir,
+            "namespace_files_missing",
+            f"No *.jsonl files found in {namespace_dir}",
+            namespace_dir,
             0,
         )
-        return issues, state_counts, total_records
+        return {}, 0
 
     for jsonl_file in jsonl_files:
-        partition_key = jsonl_file.stem
-        if partition_key != "unknown" and (len(partition_key) != 4 or not partition_key.isdigit()):
-            add_issue(
-                issues,
-                "error",
-                "invalid_partition_filename",
-                f"Invalid partition filename: {jsonl_file.name}",
-                jsonl_file,
-                0,
-            )
+        partition = jsonl_file.stem
+        if not validate_partition_name(partition=partition, issues=issues, file_path=jsonl_file, line_no=0):
             continue
 
         with jsonl_file.open("r", encoding="utf-8") as handle:
@@ -785,7 +1042,7 @@ def validate_ledger(ledger_dir: Path) -> tuple[list[Issue], Counter, int]:
                     continue
                 total_records += 1
                 try:
-                    record = json.loads(line_text)
+                    row = json.loads(line_text)
                 except json.JSONDecodeError as exc:
                     add_issue(
                         issues,
@@ -797,130 +1054,141 @@ def validate_ledger(ledger_dir: Path) -> tuple[list[Issue], Counter, int]:
                     )
                     continue
 
-                if not isinstance(record, dict):
+                if not isinstance(row, dict):
                     add_issue(
                         issues,
                         "error",
                         "record_not_object",
-                        f"Record must be object, got {type(record).__name__}",
+                        f"Record must be object, got {type(row).__name__}",
                         jsonl_file,
                         line_no,
                     )
                     continue
 
-                missing_fields = sorted(REQUIRED_TOP_LEVEL_FIELDS - set(record.keys()))
-                if missing_fields:
-                    add_issue(
-                        issues,
-                        "error",
-                        "record_missing_required_fields",
-                        f"Missing required fields: {missing_fields}",
-                        jsonl_file,
-                        line_no,
+                if namespace == URL_NS:
+                    validate_url_row(
+                        partition=partition,
+                        row=row,
+                        issues=issues,
+                        file_path=jsonl_file,
+                        line_no=line_no,
                     )
-                    continue
-
-                unique_code = record.get("unique_code")
-                if not isinstance(unique_code, str) or not unique_code.strip():
-                    add_issue(
-                        issues,
-                        "error",
-                        "unique_code_invalid",
-                        f"Invalid unique_code={unique_code!r}",
-                        jsonl_file,
-                        line_no,
-                    )
+                elif namespace == UPLOAD_NS:
+                    validate_upload_row(row=row, issues=issues, file_path=jsonl_file, line_no=line_no)
+                    state_value = row.get("state")
+                    if isinstance(state_value, str):
+                        state_counts[state_value] += 1
                 else:
-                    if unique_code in duplicate_tracker:
-                        first_file, first_line = duplicate_tracker[unique_code]
-                        add_issue(
-                            issues,
-                            "error",
-                            "duplicate_unique_code",
-                            (
-                                f"Duplicate unique_code={unique_code} (first seen at "
-                                f"{first_file}:{first_line})"
-                            ),
-                            jsonl_file,
-                            line_no,
-                        )
-                    else:
-                        duplicate_tracker[unique_code] = (jsonl_file, line_no)
+                    validate_pdf_row(row=row, issues=issues, file_path=jsonl_file, line_no=line_no)
 
-                source_url = record.get("source_url")
-                if not isinstance(source_url, str) or not source_url.strip():
+                record_key = row.get("record_key")
+                if not isinstance(record_key, str) or not record_key.strip():
+                    continue
+                record_key = record_key.strip()
+                existing_ref = rows_by_key.get(record_key)
+                if existing_ref is not None:
                     add_issue(
                         issues,
-                        "warning",
-                        "source_url_empty",
-                        "source_url is empty",
+                        "error",
+                        "duplicate_record_key",
+                        (
+                            f"Duplicate record_key={record_key!r} in {namespace} "
+                            f"(first seen at {existing_ref.file_path}:{existing_ref.line_no})"
+                        ),
                         jsonl_file,
                         line_no,
                     )
-
-                validate_partition_against_gr_date(
-                    partition_key=partition_key,
-                    gr_date_value=record.get("gr_date"),
-                    issues=issues,
+                    continue
+                rows_by_key[record_key] = RowRef(
+                    namespace=namespace,
+                    partition=partition,
                     file_path=jsonl_file,
                     line_no=line_no,
-                )
-                validate_attempt_counts(
-                    attempts=record.get("attempt_counts"),
-                    issues=issues,
-                    file_path=jsonl_file,
-                    line_no=line_no,
-                )
-                validate_stage_objects(
-                    record=record,
-                    issues=issues,
-                    file_path=jsonl_file,
-                    line_no=line_no,
-                )
-                validate_lfs_path(
-                    record=record,
-                    issues=issues,
-                    file_path=jsonl_file,
-                    line_no=line_no,
-                )
-                validate_state_consistency(
-                    record=record,
-                    issues=issues,
-                    file_path=jsonl_file,
-                    line_no=line_no,
-                )
-                validate_pdf_info(
-                    record=record,
-                    issues=issues,
-                    file_path=jsonl_file,
-                    line_no=line_no,
-                )
-                validate_dates_and_timestamps(
-                    record=record,
-                    issues=issues,
-                    file_path=jsonl_file,
-                    line_no=line_no,
+                    row=row,
                 )
 
-                state = record.get("state")
-                if isinstance(state, str):
-                    state_counts[state] += 1
+    return rows_by_key, total_records
 
-    return issues, state_counts, total_records
+
+def validate_cross_namespace(
+    *,
+    refs_by_ns: dict[str, dict[str, RowRef]],
+    issues: list[Issue],
+) -> None:
+    all_keys: set[str] = set()
+    for refs in refs_by_ns.values():
+        all_keys.update(refs.keys())
+
+    for record_key in sorted(all_keys):
+        present_refs: dict[str, RowRef] = {
+            ns: refs_by_ns[ns][record_key]
+            for ns in NAMESPACES
+            if record_key in refs_by_ns[ns]
+        }
+        missing = [ns for ns in NAMESPACES if ns not in present_refs]
+        if missing:
+            anchor = next(iter(present_refs.values()))
+            add_issue(
+                issues,
+                "error",
+                "record_key_missing_namespace",
+                f"record_key={record_key!r} missing namespaces: {missing}",
+                anchor.file_path,
+                anchor.line_no,
+            )
+            continue
+
+        partitions = {ref.partition for ref in present_refs.values()}
+        if len(partitions) > 1:
+            anchor = present_refs[URL_NS]
+            add_issue(
+                issues,
+                "error",
+                "cross_namespace_partition_mismatch",
+                f"record_key={record_key!r} has namespace partitions: {sorted(partitions)}",
+                anchor.file_path,
+                anchor.line_no,
+            )
+
+
+def validate_ledger(ledger_dir: Path) -> tuple[list[Issue], Counter, dict[str, int]]:
+    issues: list[Issue] = []
+    state_counts: Counter = Counter()
+    namespace_counts: dict[str, int] = {ns: 0 for ns in NAMESPACES}
+
+    root_dir = resolve_ledger_root(ledger_dir)
+    refs_by_ns: dict[str, dict[str, RowRef]] = {}
+
+    for namespace in NAMESPACES:
+        refs, count = validate_namespace_rows(
+            root_dir=root_dir,
+            namespace=namespace,
+            issues=issues,
+            state_counts=state_counts,
+        )
+        refs_by_ns[namespace] = refs
+        namespace_counts[namespace] = count
+
+    validate_cross_namespace(refs_by_ns=refs_by_ns, issues=issues)
+    return issues, state_counts, namespace_counts
 
 
 def print_report(
+    *,
     issues: list[Issue],
     state_counts: Counter,
-    total_records: int,
+    namespace_counts: dict[str, int],
     ledger_dir: Path,
     max_issues_per_code: int,
 ) -> tuple[int, int]:
     errors = [issue for issue in issues if issue.severity == "error"]
     warnings = [issue for issue in issues if issue.severity == "warning"]
 
-    print(f"Ledger dir: {ledger_dir}")
-    print(f"Records checked: {total_records}")
+    root_dir = resolve_ledger_root(ledger_dir)
+    print(f"Ledger root: {root_dir}")
+    print("Records checked:")
+    for namespace in NAMESPACES:
+        print(f"  {namespace}: {namespace_counts.get(namespace, 0)}")
     print(f"Errors: {len(errors)}")
     print(f"Warnings: {len(warnings)}")
 
@@ -937,10 +1205,7 @@ def print_report(
         for (severity, code), group in sorted(grouped_issues.items()):
             print(f"  [{severity}] {code}: {len(group)}")
             for item in group[:max_issues_per_code]:
-                print(
-                    "    "
-                    f"{item.file_path}:{item.line_no}: {item.message}"
-                )
+                print(f"    {item.file_path}:{item.line_no}: {item.message}")
             hidden = len(group) - max_issues_per_code
             if hidden > 0:
                 print(f"    ... {hidden} more")
@@ -950,11 +1215,11 @@ def print_report(
 
 def run_from_args(args: argparse.Namespace) -> int:
     ledger_dir = Path(args.ledger_dir).resolve()
-    issues, state_counts, total_records = validate_ledger(ledger_dir=ledger_dir)
+    issues, state_counts, namespace_counts = validate_ledger(ledger_dir=ledger_dir)
     error_count, warning_count = print_report(
         issues=issues,
         state_counts=state_counts,
-        total_records=total_records,
+        namespace_counts=namespace_counts,
         ledger_dir=ledger_dir,
         max_issues_per_code=args.max_issues_per_code,
     )

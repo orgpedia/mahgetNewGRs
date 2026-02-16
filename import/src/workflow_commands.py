@@ -12,12 +12,12 @@ import gr_site_job
 import wayback_job
 from archive_job import ArchiveJobConfig, run_archive_job
 from gr_site_job import gather_source_files, normalize_rows, parse_gr_date, run_daily, run_monthly, run_weekly
-from ledger_engine import LedgerStore
+from info_store import InfoStore as LedgerStore
 from wayback_job import WaybackJobConfig, run_wayback_job
 
 
 def _add_common_workflow_args(parser: argparse.ArgumentParser, include_sources: bool = True) -> argparse.ArgumentParser:
-    parser.add_argument("--ledger-dir", default="import/grinfo", help="Ledger directory")
+    parser.add_argument("--ledger-dir", default="import/grinfo", help="Ledger root directory (supports split ledgers)")
     parser.add_argument("--max-records", type=int, default=0, help="Optional cap for each stage")
     parser.add_argument("--dry-run", action="store_true", help="Plan actions without writing")
     parser.add_argument("--service-failure-limit", type=int, default=10, help="Stop stage after N service failures")
