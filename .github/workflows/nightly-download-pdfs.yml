@@ -17,11 +17,6 @@ jobs:
       contents: write
     env:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
-      HF_DATASET_REPO_PATH: ${{ vars.HF_DATASET_REPO_PATH }}
-      HF_DATASET_REPO_URL: ${{ vars.HF_DATASET_REPO_URL }}
-      HF_DATASET_REPO_ID: ${{ vars.HF_DATASET_REPO_ID }}
-      HF_UPLOAD_LARGE_FOLDER_MODE: ${{ vars.HF_UPLOAD_LARGE_FOLDER_MODE }}
-      HF_UPLOAD_LARGE_FOLDER_THRESHOLD: ${{ vars.HF_UPLOAD_LARGE_FOLDER_THRESHOLD }}
       IA_ACCESS_KEY: ${{ secrets.IA_ACCESS_KEY }}
       IA_SECRET_KEY: ${{ secrets.IA_SECRET_KEY }}
     steps:
@@ -46,9 +41,9 @@ jobs:
 
       - name: Run nightly download
         run: |
-          HF_REPO_PATH="${HF_DATASET_REPO_PATH:-LFS/mahGRs}"
+          HF_REPO_PATH="$(python3 -c "import sys; sys.path.insert(0, 'import/src'); from import_config import load_import_config; print(load_import_config().hf.dataset_repo_path)")"
           mkdir -p "$HF_REPO_PATH"
-          uv run make download-pdfs HF_REPO_PATH="$HF_REPO_PATH"
+          uv run make download-pdfs
 
       - name: Pull latest changes in repository
         run: git pull --rebase origin "${GITHUB_REF_NAME}"
