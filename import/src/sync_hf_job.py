@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from import_config import load_import_config
 from local_env import load_local_env
 
 try:
@@ -90,7 +91,9 @@ def _looks_like_placeholder(value: str) -> bool:
 def resolve_hf_repo_path(path_text: str, *, create_if_missing: bool = False) -> Path:
     text = (path_text or "").strip()
     if not text:
-        raise SyncHFError("`--hf-repo-path` is required (or set `HF_DATASET_REPO_PATH`).")
+        raise SyncHFError(
+            "`--hf-repo-path` is required (or set `hf.dataset_repo_path` in `import/import_config.yaml`)."
+        )
     if _looks_like_placeholder(text):
         raise SyncHFError(
             "HF local path looks like a template placeholder "
@@ -101,7 +104,8 @@ def resolve_hf_repo_path(path_text: str, *, create_if_missing: bool = False) -> 
     if not path.exists():
         if not create_if_missing:
             raise SyncHFError(
-                f"HF local path does not exist: {path}. Create it or set `HF_DATASET_REPO_PATH` correctly."
+                f"HF local path does not exist: {path}. "
+                "Create it or update `hf.dataset_repo_path` in `import/import_config.yaml`."
             )
         path.mkdir(parents=True, exist_ok=True)
     if not path.is_dir():
@@ -140,7 +144,9 @@ def resolve_hf_repo_id(repo_id_text: str, repo_url_text: str) -> str:
 
     if not repo_id:
         raise SyncHFError(
-            "Unable to resolve HF dataset repo id. Set `--hf-repo-id` or `HF_DATASET_REPO_URL`."
+            "Unable to resolve HF dataset repo id. "
+            "Set `--hf-repo-id`, `--hf-remote-url`, or configure "
+            "`hf.dataset_repo_id` / `hf.dataset_repo_url` in `import/import_config.yaml`."
         )
     if _looks_like_placeholder(repo_id):
         raise SyncHFError("HF dataset repo id looks like a template placeholder. Set a real repo id.")
@@ -662,6 +668,8 @@ def run_sync_hf(config: SyncHFConfig) -> None:
 
 
 def configure_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    hf_defaults = load_import_config().hf
+
     parser.description = "Sync local LFS-style artifacts with Hugging Face dataset using HF Hub API."
     parser.add_argument(
         "--source-root",
@@ -670,18 +678,24 @@ def configure_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser
     )
     parser.add_argument(
         "--hf-repo-path",
-        default=os.environ.get("HF_DATASET_REPO_PATH", ""),
-        help="Local data directory (upload source or download destination).",
+        default=hf_defaults.dataset_repo_path,
+        help="Local data directory (default from `import/import_config.yaml` -> `hf.dataset_repo_path`).",
     )
     parser.add_argument(
         "--hf-repo-id",
-        default=os.environ.get("HF_DATASET_REPO_ID", ""),
-        help="HF dataset repo id in `namespace/name` format (optional if URL is set).",
+        default=hf_defaults.dataset_repo_id,
+        help=(
+            "HF dataset repo id in `namespace/name` format "
+            "(default from `import/import_config.yaml` -> `hf.dataset_repo_id`)."
+        ),
     )
     parser.add_argument(
         "--hf-remote-url",
-        default=os.environ.get("HF_DATASET_REPO_URL", ""),
-        help="HF dataset URL used to infer repo id when `--hf-repo-id` is not provided.",
+        default=hf_defaults.dataset_repo_url,
+        help=(
+            "HF dataset URL used to infer repo id when `--hf-repo-id` is not provided "
+            "(default from `import/import_config.yaml` -> `hf.dataset_repo_url`)."
+        ),
     )
     parser.add_argument("--hf-token", default=os.environ.get("HF_TOKEN", ""), help="HF token")
     parser.add_argument(
@@ -714,14 +728,17 @@ def configure_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser
     parser.add_argument(
         "--large-folder-mode",
         choices=(LARGE_FOLDER_MODE_AUTO, LARGE_FOLDER_MODE_ALWAYS, LARGE_FOLDER_MODE_NEVER),
-        default=os.environ.get("HF_UPLOAD_LARGE_FOLDER_MODE", LARGE_FOLDER_MODE_AUTO),
+        default=hf_defaults.upload_large_folder_mode or LARGE_FOLDER_MODE_AUTO,
         help="Large-folder strategy for upload mode: auto (default), always, never.",
     )
     parser.add_argument(
         "--large-folder-threshold",
         type=int,
-        default=_env_int("HF_UPLOAD_LARGE_FOLDER_THRESHOLD", DEFAULT_LARGE_FOLDER_THRESHOLD),
-        help="Auto mode threshold: use upload_large_folder when file count meets/exceeds this value.",
+        default=max(hf_defaults.upload_large_folder_threshold, 1),
+        help=(
+            "Auto mode threshold: use upload_large_folder when file count meets/exceeds this value "
+            "(default from `import/import_config.yaml` -> `hf.upload_large_folder_threshold`)."
+        ),
     )
     parser.add_argument(
         "--large-folder-num-workers",

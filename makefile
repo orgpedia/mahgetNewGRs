@@ -1,10 +1,11 @@
 .DEFAULT_GOAL := help
 
 CLI := python3 import/src/cli.py
+HF_REPO_PATH_DEFAULT := $(shell python3 -c "import sys; sys.path.insert(0, 'import/src'); from import_config import load_import_config; print(load_import_config().hf.dataset_repo_path)")
 
 LEDGER_DIR ?= import/grinfo
 SOURCE_DIR ?= import/websites/gr.maharashtra.gov.in
-HF_REPO_PATH ?= $(HF_DATASET_REPO_PATH)
+HF_REPO_PATH ?= $(HF_REPO_PATH_DEFAULT)
 IMPORT_DIR ?=
 
 ifeq ($(strip $(HF_REPO_PATH)),)

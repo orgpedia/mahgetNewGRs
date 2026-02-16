@@ -50,7 +50,8 @@ Use `make help` for available targets. Required spec targets:
 Environment variables used by stages:
 
 - Wayback SPN2 + Archive.org: `IA_ACCESS_KEY`, `IA_SECRET_KEY`
-- HF sync: `HF_TOKEN`, `HF_DATASET_REPO_PATH`, `HF_DATASET_REPO_URL` (or `HF_DATASET_REPO_ID`)
+- HF sync token: `HF_TOKEN`
+- HF sync defaults: `import/import_config.yaml` -> `hf` section (`dataset_repo_url`, `dataset_repo_id`, `dataset_repo_path`, `upload_large_folder_mode`, `upload_large_folder_threshold`)
 
 ## Hugging Face sync modes
 

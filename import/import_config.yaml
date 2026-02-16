@@ -3,3 +3,9 @@ attempt_thresholds:
   wayback: 3
   archive: 3
   hf: 3
+hf:
+  dataset_repo_url: https://huggingface.co/datasets/Orgpedia/mahGRs
+  dataset_repo_id: Orgpedia/mahGRs
+  dataset_repo_path: LFS/mahGRs
+  upload_large_folder_mode: auto
+  upload_large_folder_threshold: 100

@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import import_pdfs_job
+from import_config import load_import_config
 from info_store import InfoStore as LedgerStore
 from local_env import load_local_env
 from sync_hf_job import SyncHFConfig, SyncHFError, resolve_hf_repo_path, run_sync_hf
@@ -83,6 +84,8 @@ class DownloadPdfsReport:
 
 
 def configure_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    hf_defaults = load_import_config().hf
+
     parser.description = (
         "Backfill missing PDFs for ledger rows where lfs_path is null, "
         "import into LFS, then sync to Hugging Face in batches."
@@ -100,8 +103,8 @@ def configure_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser
     )
     parser.add_argument(
         "--hf-repo-path",
-        default=os.environ.get("HF_DATASET_REPO_PATH", "LFS/mahGRs"),
-        help="Local HF sync root (same value used by sync-hf/import-pdfs)",
+        default=hf_defaults.dataset_repo_path,
+        help="Local HF sync root (default from `import/import_config.yaml`).",
     )
     parser.add_argument("--hf-remote-name", default="origin", help="Deprecated compatibility flag")
     parser.add_argument("--hf-branch", default="main", help="Branch used by sync-hf")
@@ -119,7 +122,11 @@ def configure_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser
     parser.add_argument("--hf-no-verify-storage", action="store_true", help="Skip post-sync verification")
     parser.add_argument("--hf-skip-push", action="store_true", help="Skip HF upload during batch sync")
     parser.add_argument("--hf-token", default=os.environ.get("HF_TOKEN", ""), help="HF token override")
-    parser.add_argument("--hf-remote-url", default=os.environ.get("HF_DATASET_REPO_URL", ""), help="HF repo URL override")
+    parser.add_argument(
+        "--hf-remote-url",
+        default=hf_defaults.dataset_repo_url,
+        help="HF repo URL override (default from `import/import_config.yaml`).",
+    )
 
     parser.add_argument(
         "--batch-success-size",

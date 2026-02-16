@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from department_codes import department_code_from_name
+from import_config import load_import_config
 from info_store import InfoStore as LedgerStore
 from ledger_engine import to_ledger_relative_path
 from local_env import load_local_env
@@ -229,6 +230,8 @@ def _run_hf_sync(config: ImportPdfsConfig) -> int:
 
 
 def configure_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    hf_defaults = load_import_config().hf
+
     parser.description = (
         "Import existing PDF files into LFS/pdfs/<department>/<YYYY-MM>/<unique_code>.pdf and optionally sync to HF."
     )
@@ -242,8 +245,8 @@ def configure_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser
 
     parser.add_argument(
         "--hf-repo-path",
-        default=os.environ.get("HF_DATASET_REPO_PATH", ""),
-        help="Local data directory used by sync-hf upload",
+        default=hf_defaults.dataset_repo_path,
+        help="Local data directory used by sync-hf upload (default from `import/import_config.yaml`).",
     )
     parser.add_argument("--hf-remote-name", default="origin", help="Deprecated compatibility flag")
     parser.add_argument("--hf-branch", default="main", help="Deprecated compatibility flag")
@@ -257,7 +260,11 @@ def configure_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser
     parser.add_argument("--hf-no-verify-storage", action="store_true", help="Skip post-upload/download verification")
     parser.add_argument("--hf-skip-push", action="store_true", help="Skip upload during HF sync")
     parser.add_argument("--hf-token", default=os.environ.get("HF_TOKEN", ""), help="HF token override")
-    parser.add_argument("--hf-remote-url", default=os.environ.get("HF_DATASET_REPO_URL", ""), help="HF remote URL override")
+    parser.add_argument(
+        "--hf-remote-url",
+        default=hf_defaults.dataset_repo_url,
+        help="HF remote URL override (default from `import/import_config.yaml`).",
+    )
     return parser
 
 
