@@ -1,4 +1,4 @@
-{"created_at_utc": "2026-02-06T08:41:42Z", "record_key": "0110905144701001", "status": "not_attempted", "updated_at_utc": "2026-02-11T17:14:28Z"}
+{"created_at_utc": "2026-02-06T08:41:42Z", "error": "", "file_size": 455967, "font_count": 0, "fonts": {}, "has_any_page_image": true, "language": {"inferred": "unknown", "script_word_counts": {}, "total_words": 0}, "page_count": 18, "pages_with_images": 18, "record_key": "0110905144701001", "status": "success", "unresolved_word_count": 0, "updated_at_utc": "2026-02-16T12:51:33Z"}
 {"created_at_utc": "2026-02-06T08:41:42Z", "record_key": "20010808153057001", "status": "not_attempted", "updated_at_utc": "2026-02-11T17:14:28Z"}
 {"created_at_utc": "2026-02-06T08:41:42Z", "record_key": "20061212", "status": "not_attempted", "updated_at_utc": "2026-02-11T17:14:28Z"}
 {"created_at_utc": "2026-02-06T08:41:42Z", "record_key": "20100614185533001", "status": "not_attempted", "updated_at_utc": "2026-02-11T17:14:28Z"}
