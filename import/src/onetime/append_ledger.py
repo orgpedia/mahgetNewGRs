@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
-from build_baseline_ledger import (
+from onetime.build_baseline_ledger import (
     canonical_unique_code,
     existing_stage_files,
     first_non_empty,
@@ -214,7 +214,7 @@ def run_append_ledger(config: AppendLedgerConfig) -> AppendLedgerReport:
             "gr_date": candidate.gr_date,
             "source_url": candidate.source_url,
         }
-        store.upsert(
+        store.insert(
             record,
             run_type="daily",
             crawl_date=candidate.crawl_date,

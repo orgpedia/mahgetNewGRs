@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import re
 from collections import Counter, defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -32,6 +32,7 @@ SCRIPT_TO_LANGUAGE = {
     "Malayalam": "ml",
     "Oriya": "or",
 }
+PDF_INFO_UPDATE_BATCH_SIZE = 100
 
 
 class PdfInfoDependencyError(RuntimeError):
@@ -46,6 +47,7 @@ class PdfInfoConfig:
     force: bool
     mark_missing: bool
     verbose: bool
+    code_filter: set[str] = field(default_factory=set)
 
 
 @dataclass
@@ -58,29 +60,6 @@ class PdfInfoReport:
     skipped_no_local_pdf: int = 0
     extraction_failed: int = 0
     partitions_changed: int = 0
-
-
-def configure_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
-    parser.description = (
-        "Extract PDF metadata for ledger records and store it in record.pdf_info. "
-        "Includes page count, image presence, used-font word counts, language inference, and file size."
-    )
-    parser.add_argument("--ledger-dir", default="import/grinfo", help="Ledger root directory (supports split ledgers)")
-    parser.add_argument(
-        "--max-records",
-        type=int,
-        default=0,
-        help="Maximum records to process (0 means no limit)",
-    )
-    parser.add_argument("--dry-run", action="store_true", help="Compute/report changes without writing ledger files")
-    parser.add_argument("--force", action="store_true", help="Recompute even when pdf_info.status is already success")
-    parser.add_argument(
-        "--mark-missing",
-        action="store_true",
-        help="Set pdf_info.status=missing_pdf when no local PDF path resolves",
-    )
-    parser.add_argument("--verbose", action="store_true", help="Print detailed per-record processing logs")
-    return parser
 
 
 def _load_fitz() -> Any:
@@ -463,7 +442,7 @@ def _record_label(partition: str, unique_code: str) -> str:
     return f"{partition}:<missing-unique_code>"
 
 
-def run_pdf_info(config: PdfInfoConfig) -> PdfInfoReport:
+def run_pdf_info_stage(config: PdfInfoConfig) -> PdfInfoReport:
     if not config.ledger_dir.exists() or not config.ledger_dir.is_dir():
         raise FileNotFoundError(f"Ledger directory not found: {config.ledger_dir}")
 
@@ -472,6 +451,16 @@ def run_pdf_info(config: PdfInfoConfig) -> PdfInfoReport:
     report = PdfInfoReport()
     max_records = max(0, config.max_records)
     changed_partitions: set[str] = set()
+    pending_updates: list[dict[str, Any]] = []
+
+    def _flush_pending_updates() -> None:
+        nonlocal pending_updates
+        if not pending_updates:
+            return
+        results = store.update_many(pending_updates)
+        for result in results:
+            changed_partitions.add(result.partition)
+        pending_updates = []
 
     for record in store.iter_records():
         unique_code = str(record.get("unique_code") or "").strip()
@@ -485,6 +474,10 @@ def run_pdf_info(config: PdfInfoConfig) -> PdfInfoReport:
 
         if not unique_code:
             _verbose_log(config, f"[skip invalid] {label}")
+            continue
+
+        if config.code_filter and unique_code not in config.code_filter:
+            _verbose_log(config, f"[skip filter] {label}")
             continue
 
         current_pdf_info = record.get("pdf_info")
@@ -535,17 +528,19 @@ def run_pdf_info(config: PdfInfoConfig) -> PdfInfoReport:
             _verbose_log(config, f"[dry-run update] {label}")
             continue
 
-        result = store.upsert({"unique_code": unique_code, "pdf_info": next_pdf_info})
-        changed_partitions.add(result.partition)
+        pending_updates.append({"unique_code": unique_code, "pdf_info": next_pdf_info})
+        if len(pending_updates) >= PDF_INFO_UPDATE_BATCH_SIZE:
+            _flush_pending_updates()
         _verbose_log(config, f"[updated] {label}")
 
     if not config.dry_run:
+        _flush_pending_updates()
         report.partitions_changed = len(changed_partitions)
 
     return report
 
 
-def _print_report(report: PdfInfoReport, *, dry_run: bool) -> None:
+def print_pdf_info_stage_report(report: PdfInfoReport, *, dry_run: bool) -> None:
     print("pdf-info:")
     print(f"  dry_run: {dry_run}")
     print(f"  scanned_records: {report.scanned_records}")
@@ -558,6 +553,29 @@ def _print_report(report: PdfInfoReport, *, dry_run: bool) -> None:
     print(f"  partitions_changed: {report.partitions_changed}")
 
 
+def configure_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    parser.description = (
+        "Extract PDF metadata for ledger records and store it in record.pdf_info. "
+        "Includes page count, image presence, used-font word counts, language inference, and file size."
+    )
+    parser.add_argument("--ledger-dir", default="import/grinfo", help="Ledger root directory (supports split ledgers)")
+    parser.add_argument(
+        "--max-records",
+        type=int,
+        default=0,
+        help="Maximum records to process (0 means no limit)",
+    )
+    parser.add_argument("--dry-run", action="store_true", help="Compute/report changes without writing ledger files")
+    parser.add_argument("--force", action="store_true", help="Recompute even when pdf_info.status is already success")
+    parser.add_argument(
+        "--mark-missing",
+        action="store_true",
+        help="Set pdf_info.status=missing_pdf when no local PDF path resolves",
+    )
+    parser.add_argument("--verbose", action="store_true", help="Print detailed per-record processing logs")
+    return parser
+
+
 def run_from_args(args: argparse.Namespace) -> int:
     config = PdfInfoConfig(
         ledger_dir=Path(args.ledger_dir).resolve(),
@@ -568,12 +586,12 @@ def run_from_args(args: argparse.Namespace) -> int:
         verbose=args.verbose,
     )
     try:
-        report = run_pdf_info(config)
+        report = run_pdf_info_stage(config)
     except PdfInfoDependencyError as exc:
         print(f"pdf-info error: {exc}")
         return 2
 
-    _print_report(report, dry_run=config.dry_run)
+    print_pdf_info_stage_report(report, dry_run=config.dry_run)
     return 0
 
 

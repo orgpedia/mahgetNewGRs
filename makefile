@@ -12,7 +12,7 @@ ifeq ($(strip $(HF_REPO_PATH)),)
 HF_REPO_PATH := LFS/mahGRs
 endif
 
-.PHONY: help baseline-ledger migrate-infos append-ledger backfill-lfs-path download-pdfs pdf-info validate status-readme import-pdfs daily weekly monthly job-gr-site job-wayback job-archive sync-hf
+.PHONY: help baseline-ledger migrate-infos append-ledger backfill-lfs-path validate status-readme job-gr-site job-wayback job-archive job-download-pdf job-import-pdf job-pdf-info wrk-download-upload-pdfinfo sync-hf
 
 help:
 	@echo "Usage: make <target>"
@@ -22,14 +22,12 @@ help:
 	@echo "  migrate-infos    Split import/grinfo into urlinfos/uploadinfos/pdfinfos"
 	@echo "  append-ledger    Append only new records from mahgetGR into ledger"
 	@echo "  backfill-lfs-path Backfill ledger lfs_path from local LFS PDFs"
-	@echo "  download-pdfs    Download null lfs_path PDFs, import in batches, sync HF"
-	@echo "  pdf-info         Extract PDF metadata into ledger pdf_info"
+	@echo "  job-download-pdf Run download-pdf stage job"
+	@echo "  job-import-pdf   Import local PDFs into LFS/pdfs and optionally sync HF"
+	@echo "  job-pdf-info     Extract PDF metadata into ledger pdf_info"
+	@echo "  wrk-download-upload-pdfinfo Run one batch: download -> upload -> pdf-info"
 	@echo "  validate         Validate yearly JSONL ledgers"
 	@echo "  status-readme    Refresh README status table from ledger"
-	@echo "  import-pdfs      Import local PDFs into LFS/pdfs and sync HF"
-	@echo "  daily            Run daily workflow"
-	@echo "  weekly           Run weekly workflow"
-	@echo "  monthly          Run monthly workflow"
 	@echo "  job-gr-site      Run gr-site job (set MODE=daily|weekly|monthly)"
 	@echo "  job-wayback      Run wayback stage job"
 	@echo "  job-archive      Run archive stage job"
@@ -50,12 +48,8 @@ backfill-lfs-path:
 	$(CLI) backfill-lfs-path --ledger-dir $(LEDGER_DIR)
 	$(CLI) update-readme-status --ledger-dir $(LEDGER_DIR) --readme-path README.md
 
-download-pdfs:
-	$(CLI) download-pdfs --ledger-dir $(LEDGER_DIR) --hf-repo-path "$(HF_REPO_PATH)" --lfs-pdf-root "$(HF_REPO_PATH)/pdfs"
-	$(CLI) update-readme-status --ledger-dir $(LEDGER_DIR) --readme-path README.md
-
-pdf-info:
-	$(CLI) pdf-info --ledger-dir $(LEDGER_DIR)
+job-pdf-info:
+	$(CLI) job-pdf-info --ledger-dir $(LEDGER_DIR)
 	$(CLI) update-readme-status --ledger-dir $(LEDGER_DIR) --readme-path README.md
 
 validate:
@@ -64,24 +58,12 @@ validate:
 status-readme:
 	$(CLI) update-readme-status --ledger-dir $(LEDGER_DIR) --readme-path README.md
 
-import-pdfs:
+job-import-pdf:
 	@if [ -z "$(IMPORT_DIR)" ] || [ -z "$(HF_REPO_PATH)" ]; then \
-		echo "Usage: make import-pdfs IMPORT_DIR=/path/to/pdfs HF_REPO_PATH=/path/to/local/lfs-data-root"; \
+		echo "Usage: make job-import-pdf IMPORT_DIR=/path/to/pdfs HF_REPO_PATH=/path/to/local/lfs-data-root"; \
 		exit 2; \
 	fi
-	$(CLI) import-pdfs --source-dir "$(IMPORT_DIR)" --ledger-dir $(LEDGER_DIR) --hf-repo-path "$(HF_REPO_PATH)"
-	$(CLI) update-readme-status --ledger-dir $(LEDGER_DIR) --readme-path README.md
-
-daily:
-	$(CLI) daily --ledger-dir $(LEDGER_DIR) --source-dir $(SOURCE_DIR)
-	$(CLI) update-readme-status --ledger-dir $(LEDGER_DIR) --readme-path README.md
-
-weekly:
-	$(CLI) weekly --ledger-dir $(LEDGER_DIR)
-	$(CLI) update-readme-status --ledger-dir $(LEDGER_DIR) --readme-path README.md
-
-monthly:
-	$(CLI) monthly --ledger-dir $(LEDGER_DIR) --source-dir $(SOURCE_DIR)
+	$(CLI) job-import-pdf --source-dir "$(IMPORT_DIR)" --ledger-dir $(LEDGER_DIR) --hf-repo-path "$(HF_REPO_PATH)"
 	$(CLI) update-readme-status --ledger-dir $(LEDGER_DIR) --readme-path README.md
 
 MODE ?= daily
@@ -95,6 +77,14 @@ job-wayback:
 
 job-archive:
 	$(CLI) job-archive --ledger-dir $(LEDGER_DIR)
+	$(CLI) update-readme-status --ledger-dir $(LEDGER_DIR) --readme-path README.md
+
+job-download-pdf:
+	$(CLI) job-download-pdf --ledger-dir $(LEDGER_DIR)
+	$(CLI) update-readme-status --ledger-dir $(LEDGER_DIR) --readme-path README.md
+
+wrk-download-upload-pdfinfo:
+	$(CLI) wrk-download-upload-pdfinfo --ledger-dir $(LEDGER_DIR) --hf-repo-path "$(HF_REPO_PATH)"
 	$(CLI) update-readme-status --ledger-dir $(LEDGER_DIR) --readme-path README.md
 
 sync-hf:

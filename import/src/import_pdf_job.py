@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import os
 import re
 import shutil
@@ -15,6 +14,7 @@ from typing import Any
 from department_codes import department_code_from_name
 from import_config import load_import_config
 from info_store import InfoStore as LedgerStore
+from job_utils import sha1_file
 from ledger_engine import to_ledger_relative_path
 from local_env import load_local_env
 from sync_hf_job import SyncHFConfig, SyncHFError, resolve_hf_repo_path, run_sync_hf
@@ -25,27 +25,17 @@ CONTROL_CATEGORIES = {"Cf", "Cc"}
 
 
 @dataclass(frozen=True)
-class ImportPdfsConfig:
+class ImportPdfStageConfig:
     source_dir: Path
     ledger_dir: Path
     lfs_pdf_root: Path
     recursive: bool
     overwrite: bool
     dry_run: bool
-    sync_hf: bool
-    hf_repo_path: Path | None
-    hf_remote_name: str
-    hf_branch: str
-    hf_commit_message: str
-    hf_storage_backend: str
-    hf_no_verify_storage: bool
-    hf_skip_push: bool
-    hf_token: str
-    hf_remote_url: str
 
 
 @dataclass
-class ImportPdfsReport:
+class ImportPdfStageReport:
     scanned_pdf_files: int = 0
     copied_files: int = 0
     overwritten_files: int = 0
@@ -82,20 +72,9 @@ def extract_unique_code(file_name: str) -> str:
 
 def year_month_from_gr_date(gr_date: Any) -> str:
     text = clean_text(gr_date)
-    if len(text) >= 7 and len(text) >= 10 and text[4] == "-" and text[7] == "-":
+    if len(text) >= 10 and text[4] == "-" and text[7] == "-":
         return text[:7]
     return "unknown"
-
-
-def sha1_file(file_path: Path) -> str:
-    digest = hashlib.sha1()
-    with file_path.open("rb") as handle:
-        while True:
-            chunk = handle.read(1024 * 1024)
-            if not chunk:
-                break
-            digest.update(chunk)
-    return digest.hexdigest().upper()
 
 
 def iter_pdf_files(source_dir: Path, recursive: bool) -> list[Path]:
@@ -124,12 +103,13 @@ def _copy_pdf(src: Path, dst: Path, *, overwrite: bool, dry_run: bool) -> str:
     return "copied"
 
 
-def run_import_pdfs(config: ImportPdfsConfig) -> ImportPdfsReport:
+def run_import_pdf_stage(config: ImportPdfStageConfig) -> ImportPdfStageReport:
     if not config.source_dir.exists() or not config.source_dir.is_dir():
         raise FileNotFoundError(f"Source directory not found: {config.source_dir}")
 
     store = LedgerStore(config.ledger_dir)
-    report = ImportPdfsReport()
+    report = ImportPdfStageReport()
+    pending_updates: list[dict[str, Any]] = []
 
     files = iter_pdf_files(config.source_dir, config.recursive)
     for file_path in files:
@@ -174,17 +154,20 @@ def run_import_pdfs(config: ImportPdfsConfig) -> ImportPdfsReport:
             destination_relpath = to_ledger_relative_path(destination)
             if record.get("lfs_path") == destination_relpath:
                 continue
-            store.upsert(
+            pending_updates.append(
                 {
                     "unique_code": unique_code,
                     "lfs_path": destination_relpath,
                 }
             )
 
+    if pending_updates:
+        store.update_many(pending_updates)
+
     return report
 
 
-def _print_report(report: ImportPdfsReport) -> None:
+def print_import_pdf_stage_report(report: ImportPdfStageReport) -> None:
     print("import-pdfs:")
     print(f"  scanned_pdf_files: {report.scanned_pdf_files}")
     print(f"  copied_files: {report.copied_files}")
@@ -196,7 +179,22 @@ def _print_report(report: ImportPdfsReport) -> None:
     print(f"  missing_ledger_record: {report.missing_ledger_record}")
 
 
-def _run_hf_sync(config: ImportPdfsConfig) -> int:
+@dataclass(frozen=True)
+class ImportPdfJobConfig:
+    stage_config: ImportPdfStageConfig
+    sync_hf: bool
+    hf_repo_path: Path | None
+    hf_remote_name: str
+    hf_branch: str
+    hf_commit_message: str
+    hf_storage_backend: str
+    hf_no_verify_storage: bool
+    hf_skip_push: bool
+    hf_token: str
+    hf_remote_url: str
+
+
+def _run_hf_sync(config: ImportPdfJobConfig) -> int:
     if config.hf_repo_path is None:
         print("import-pdfs: --hf-repo-path is required unless --skip-sync-hf is used")
         return 2
@@ -214,7 +212,7 @@ def _run_hf_sync(config: ImportPdfsConfig) -> int:
         remote_name=config.hf_remote_name,
         branch=config.hf_branch,
         commit_message=config.hf_commit_message,
-        dry_run=config.dry_run,
+        dry_run=config.stage_config.dry_run,
         skip_push=config.hf_skip_push,
         verify_storage=not config.hf_no_verify_storage,
         storage_backend=config.hf_storage_backend,
@@ -227,6 +225,15 @@ def _run_hf_sync(config: ImportPdfsConfig) -> int:
         print(f"import-pdfs sync error: {exc}")
         return 1
     return 0
+
+
+def run_import_pdf_job(config: ImportPdfJobConfig) -> tuple[int, ImportPdfStageReport]:
+    report = run_import_pdf_stage(config.stage_config)
+    print_import_pdf_stage_report(report)
+
+    if config.sync_hf:
+        return _run_hf_sync(config), report
+    return 0, report
 
 
 def configure_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
@@ -269,13 +276,15 @@ def configure_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser
 
 
 def run_from_args(args: argparse.Namespace) -> int:
-    config = ImportPdfsConfig(
-        source_dir=Path(args.source_dir).resolve(),
-        ledger_dir=Path(args.ledger_dir).resolve(),
-        lfs_pdf_root=Path(args.lfs_pdf_root).resolve(),
-        recursive=not args.no_recursive,
-        overwrite=args.overwrite,
-        dry_run=args.dry_run,
+    config = ImportPdfJobConfig(
+        stage_config=ImportPdfStageConfig(
+            source_dir=Path(args.source_dir).resolve(),
+            ledger_dir=Path(args.ledger_dir).resolve(),
+            lfs_pdf_root=Path(args.lfs_pdf_root).resolve(),
+            recursive=not args.no_recursive,
+            overwrite=args.overwrite,
+            dry_run=args.dry_run,
+        ),
         sync_hf=not args.skip_sync_hf,
         hf_repo_path=Path(args.hf_repo_path).resolve() if args.hf_repo_path else None,
         hf_remote_name=args.hf_remote_name,
@@ -288,12 +297,8 @@ def run_from_args(args: argparse.Namespace) -> int:
         hf_remote_url=args.hf_remote_url,
     )
 
-    report = run_import_pdfs(config)
-    _print_report(report)
-
-    if config.sync_hf:
-        return _run_hf_sync(config)
-    return 0
+    exit_code, _ = run_import_pdf_job(config)
+    return exit_code
 
 
 def build_parser() -> argparse.ArgumentParser:

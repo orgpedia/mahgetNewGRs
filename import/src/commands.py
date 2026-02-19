@@ -6,20 +6,17 @@ import argparse
 from typing import Iterable
 
 import archive_job
-import append_ledger
-import backfill_lfs_path
-import build_baseline_ledger
-import download_pdfs
+import download_upload_pdfinfo_wrk
+import download_pdf_job
 import gr_site_job
-import import_pdfs_job
-import migrate_infos
+import import_pdf_job
 import pdf_info_job
 import readme_status
 import sync_hf_job
 import validate_ledger
 import wayback_job
-import workflow_commands
 from command_core import Command, CommandContext, CommandResult
+from onetime import append_ledger, backfill_lfs_path, build_baseline_ledger, migrate_infos
 
 
 class BaselineLedgerCommand(Command):
@@ -160,43 +157,43 @@ class ArchiveJobCommand(Command):
         )
 
 
-class ImportPdfsCommand(Command):
-    name = "import-pdfs"
-    help = "Import local PDFs into LFS/pdfs"
-    description = "Import PDFs from a local directory into LFS/pdfs and optionally sync to Hugging Face."
+class ImportPdfJobCommand(Command):
+    name = "job-import-pdf"
+    help = "Run import-pdf stage job"
+    description = "Import local PDFs into LFS/pdfs and optionally sync to Hugging Face."
 
     def configure_parser(self, parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
-        return import_pdfs_job.configure_parser(parser)
+        return import_pdf_job.configure_parser(parser)
 
     def run(self, args: argparse.Namespace, context: CommandContext) -> CommandResult:
-        exit_code = import_pdfs_job.run_from_args(args)
+        exit_code = import_pdf_job.run_from_args(args)
         return CommandResult(
             name=self.name,
             exit_code=exit_code,
-            message="" if exit_code == 0 else "import-pdfs failed",
+            message="" if exit_code == 0 else "job-import-pdf failed",
         )
 
 
-class DownloadPdfsCommand(Command):
-    name = "download-pdfs"
-    help = "Download missing PDFs and batch-import"
-    description = "Download ledger records with null lfs_path, import in batches, and sync to Hugging Face."
+class DownloadPdfJobCommand(Command):
+    name = "job-download-pdf"
+    help = "Run download-pdf stage job"
+    description = "Run download-pdf stage for eligible records."
 
     def configure_parser(self, parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
-        return download_pdfs.configure_parser(parser)
+        return download_pdf_job.configure_parser(parser)
 
     def run(self, args: argparse.Namespace, context: CommandContext) -> CommandResult:
-        exit_code = download_pdfs.run_from_args(args)
+        exit_code = download_pdf_job.run_from_args(args)
         return CommandResult(
             name=self.name,
             exit_code=exit_code,
-            message="" if exit_code == 0 else "download-pdfs failed",
+            message="" if exit_code == 0 else "job-download-pdf failed",
         )
 
 
-class PdfInfoCommand(Command):
-    name = "pdf-info"
-    help = "Extract PDF metadata into ledger"
+class PdfInfoJobCommand(Command):
+    name = "job-pdf-info"
+    help = "Run pdf-info stage job"
     description = "Extract page/image/font/language/file-size metadata from local PDFs into record.pdf_info."
 
     def configure_parser(self, parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
@@ -207,58 +204,24 @@ class PdfInfoCommand(Command):
         return CommandResult(
             name=self.name,
             exit_code=exit_code,
-            message="" if exit_code == 0 else "pdf-info failed",
+            message="" if exit_code == 0 else "job-pdf-info failed",
         )
 
 
-class DailyWorkflowCommand(Command):
-    name = "daily"
-    help = "Run daily workflow"
-    description = "Run daily workflow: gr-site + wayback + archive."
+class DownloadUploadPdfInfoWorkflowCommand(Command):
+    name = "wrk-download-upload-pdfinfo"
+    help = "Run batch workflow: download -> upload -> pdf-info"
+    description = "Run one batch that downloads PDFs, uploads those PDFs to HF, then computes pdf_info."
 
     def configure_parser(self, parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
-        return workflow_commands.configure_daily_parser(parser)
+        return download_upload_pdfinfo_wrk.configure_parser(parser)
 
     def run(self, args: argparse.Namespace, context: CommandContext) -> CommandResult:
-        exit_code = workflow_commands.run_daily_workflow(args)
+        exit_code = download_upload_pdfinfo_wrk.run_from_args(args)
         return CommandResult(
             name=self.name,
             exit_code=exit_code,
-            message="" if exit_code == 0 else "daily workflow failed",
-        )
-
-
-class WeeklyWorkflowCommand(Command):
-    name = "weekly"
-    help = "Run weekly workflow"
-    description = "Run weekly workflow: retry incomplete stages."
-
-    def configure_parser(self, parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
-        return workflow_commands.configure_weekly_parser(parser)
-
-    def run(self, args: argparse.Namespace, context: CommandContext) -> CommandResult:
-        exit_code = workflow_commands.run_weekly_workflow(args)
-        return CommandResult(
-            name=self.name,
-            exit_code=exit_code,
-            message="" if exit_code == 0 else "weekly workflow failed",
-        )
-
-
-class MonthlyWorkflowCommand(Command):
-    name = "monthly"
-    help = "Run monthly workflow"
-    description = "Run monthly workflow: full discovery reconciliation only."
-
-    def configure_parser(self, parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
-        return workflow_commands.configure_monthly_parser(parser)
-
-    def run(self, args: argparse.Namespace, context: CommandContext) -> CommandResult:
-        exit_code = workflow_commands.run_monthly_workflow(args)
-        return CommandResult(
-            name=self.name,
-            exit_code=exit_code,
-            message="" if exit_code == 0 else "monthly workflow failed",
+            message="" if exit_code == 0 else "wrk-download-upload-pdfinfo failed",
         )
 
 
@@ -304,14 +267,12 @@ def get_commands() -> Iterable[Command]:
         BackfillLfsPathCommand(),
         ValidateLedgerCommand(),
         UpdateReadmeStatusCommand(),
-        ImportPdfsCommand(),
-        DownloadPdfsCommand(),
-        PdfInfoCommand(),
+        ImportPdfJobCommand(),
+        DownloadPdfJobCommand(),
+        PdfInfoJobCommand(),
+        DownloadUploadPdfInfoWorkflowCommand(),
         GRSiteJobCommand(),
         WaybackJobCommand(),
         ArchiveJobCommand(),
-        DailyWorkflowCommand(),
-        WeeklyWorkflowCommand(),
-        MonthlyWorkflowCommand(),
         SyncHFCommand(),
     ]

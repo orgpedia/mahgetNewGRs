@@ -17,7 +17,7 @@ from department_codes import department_code_from_name
 from info_store import InfoStore as LedgerStore
 from ledger_engine import STATE_FETCHED
 from local_env import load_local_env
-from stage_download import DownloadStageConfig, DownloadStageReport, run_download_stage
+from download_pdf_job import DownloadStageConfig, DownloadStageReport, run_download_stage
 
 
 LONG_DIGITS_RE = re.compile(r"\d{16,22}")
@@ -222,7 +222,7 @@ def record_patch(record: CrawledRecord) -> dict[str, Any]:
 
 
 def configure_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
-    parser.description = "Process gr-site crawl logs and reconcile into ledger."
+    parser.description = "Process gr-site crawl logs and reconcile into ledger (no PDF download in this command)."
     parser.add_argument(
         "--mode",
         required=True,
@@ -245,15 +245,6 @@ def configure_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser
     parser.add_argument("--max-records", type=int, default=0, help="Optional cap on records applied")
     parser.add_argument("--dry-run", action="store_true", help="Plan actions without writing ledger")
     parser.add_argument("--show-sample", type=int, default=10, help="Print up to N sample codes")
-    parser.add_argument("--skip-download", action="store_true", help="Skip download stage in daily/weekly")
-    parser.add_argument("--lfs-root", default="LFS/pdfs", help="LFS PDF root path")
-    parser.add_argument("--download-timeout-sec", type=int, default=30, help="Download timeout seconds")
-    parser.add_argument(
-        "--service-failure-limit",
-        type=int,
-        default=10,
-        help="Stop stage after this many consecutive service failures",
-    )
     return parser
 
 
@@ -320,7 +311,7 @@ def run_daily(
 
     if not dry_run:
         for record in discovered:
-            store.upsert(record_patch(record), run_type="daily", crawl_date=record.crawl_date or crawl_date)
+            store.insert(record_patch(record), run_type="daily", crawl_date=record.crawl_date or crawl_date)
 
     report = GRSiteReport(
         mode="daily",
@@ -422,10 +413,10 @@ def run_monthly(
     if not dry_run:
         for record in monthly_records:
             if record.unique_code in known_codes:
-                store.upsert({"unique_code": record.unique_code}, run_type="monthly", crawl_date=record.crawl_date or crawl_date)
+                store.update({"unique_code": record.unique_code}, run_type="monthly", crawl_date=record.crawl_date or crawl_date)
                 touched_codes.append(record.unique_code)
             else:
-                store.upsert(record_patch(record), run_type="monthly", crawl_date=record.crawl_date or crawl_date)
+                store.insert(record_patch(record), run_type="monthly", crawl_date=record.crawl_date or crawl_date)
                 inserted_codes.append(record.unique_code)
                 known_codes.add(record.unique_code)
     else:
@@ -458,6 +449,7 @@ def run_monthly(
 def run_from_args(args: argparse.Namespace) -> int:
     ledger_dir = Path(args.ledger_dir).resolve()
     store = LedgerStore(ledger_dir)
+    print("gr-site: PDF download stage is disabled in this command.")
 
     if args.crawl_date:
         crawl_date = parse_gr_date(args.crawl_date)
@@ -472,10 +464,10 @@ def run_from_args(args: argparse.Namespace) -> int:
             store=store,
             max_records=max(0, args.max_records),
             dry_run=args.dry_run,
-            skip_download=args.skip_download,
-            lfs_root=Path(args.lfs_root),
-            download_timeout_sec=args.download_timeout_sec,
-            service_failure_limit=args.service_failure_limit,
+            skip_download=True,
+            lfs_root=Path("LFS/pdfs"),
+            download_timeout_sec=30,
+            service_failure_limit=10,
         )
         return 0
 
@@ -499,10 +491,10 @@ def run_from_args(args: argparse.Namespace) -> int:
             max_records=max(0, args.max_records),
             dry_run=args.dry_run,
             show_sample=max(0, args.show_sample),
-            skip_download=args.skip_download,
-            lfs_root=Path(args.lfs_root),
-            download_timeout_sec=args.download_timeout_sec,
-            service_failure_limit=args.service_failure_limit,
+            skip_download=True,
+            lfs_root=Path("LFS/pdfs"),
+            download_timeout_sec=30,
+            service_failure_limit=10,
         )
         return 0
 

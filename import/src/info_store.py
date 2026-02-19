@@ -341,6 +341,9 @@ class InfoStore:
                 hf_obj["status"] = "success" if hf_obj["path"] else "not_attempted"
                 hf_obj["synced_at_utc"] = now_text if hf_obj["path"] else None
 
+    def _has_upload_patch(self, record: dict[str, Any]) -> bool:
+        return any(key in record for key in ("state", "download", "wayback", "archive", "hf", "lfs_path", "attempt_counts"))
+
     def _pdf_row_from_pdf_info(self, record_key: str, pdf_info: Any, now_text: str, created_at: str) -> dict[str, Any]:
         base = {
             "record_key": record_key,
@@ -485,6 +488,195 @@ class InfoStore:
         upload_row = self._find_row(UPLOAD_NS, record_key)
         pdf_row = self._find_row(PDF_NS, record_key)
         return self._merge_record(record_key, url_row, upload_row, pdf_row)
+
+    def insert(
+        self,
+        record: dict[str, Any],
+        *,
+        run_type: str | None = None,
+        crawl_date: Any = None,
+    ) -> UpsertResult:
+        record_key = _normalize_text(record.get("record_key") or record.get("unique_code"))
+        if not record_key:
+            raise ValueError("insert requires record_key/unique_code")
+        if record_key in self._index[URL_NS]:
+            raise DuplicateUniqueCodeError(f"Record already exists: {record_key}")
+
+        now_text = utc_now_text()
+        normalized_run_type = normalize_run_type(run_type)
+        normalized_crawl_date = normalize_crawl_date(crawl_date)
+
+        url_row = self._default_url_row(record_key, now_text, normalized_crawl_date, normalized_run_type)
+        self._apply_url_patch(url_row, record, is_insert=True)
+        url_row["updated_at_utc"] = now_text
+        partition = partition_for_gr_date(url_row.get("gr_date"))
+        self._upsert_namespace_row(URL_NS, record_key, partition, url_row)
+
+        if self._has_upload_patch(record):
+            upload_row = self._default_upload_row(record_key, now_text)
+            self._apply_upload_patch(upload_row, record, now_text)
+            upload_row["updated_at_utc"] = now_text
+            self._upsert_namespace_row(UPLOAD_NS, record_key, partition, upload_row)
+
+        if "pdf_info" in record:
+            pdf_row = self._pdf_row_from_pdf_info(
+                record_key,
+                record.get("pdf_info"),
+                now_text,
+                created_at=url_row.get("created_at_utc", now_text),
+            )
+            self._upsert_namespace_row(PDF_NS, record_key, partition, pdf_row)
+
+        return UpsertResult(operation="inserted", partition=partition, unique_code=record_key)
+
+    def update(
+        self,
+        record: dict[str, Any],
+        *,
+        run_type: str | None = None,
+        crawl_date: Any = None,
+    ) -> UpsertResult:
+        results = self.update_many([record], run_type=run_type, crawl_date=crawl_date)
+        if not results:
+            raise ValueError("update requires one record")
+        return results[0]
+
+    def update_many(
+        self,
+        records: list[dict[str, Any]],
+        *,
+        run_type: str | None = None,
+        crawl_date: Any = None,
+    ) -> list[UpsertResult]:
+        if not records:
+            return []
+
+        now_text = utc_now_text()
+        normalized_run_type = normalize_run_type(run_type)
+        normalized_crawl_date = normalize_crawl_date(crawl_date)
+        touched_partitions: set[tuple[str, str]] = set()
+        results: list[UpsertResult] = []
+
+        try:
+            for record in records:
+                record_key = _normalize_text(record.get("record_key") or record.get("unique_code"))
+                if not record_key:
+                    raise ValueError("update_many requires record_key/unique_code for every record")
+
+                url_loc = self._index[URL_NS].get(record_key)
+                if url_loc is None:
+                    raise RecordNotFoundError(f"Record not found: {record_key}")
+
+                url_rows = self._read_partition(URL_NS, url_loc.partition)
+                if url_loc.index >= len(url_rows):
+                    raise RecordNotFoundError(f"Record not found in URL partition index: {record_key}")
+                current_url_row = url_rows[url_loc.index]
+                if self._row_key(current_url_row) != record_key:
+                    raise RecordNotFoundError(f"URL index mismatch for record_key={record_key}")
+
+                url_row = _deepcopy_obj(current_url_row)
+                self._apply_url_patch(url_row, record, is_insert=False)
+                if normalized_run_type == "monthly":
+                    existing_last_seen = _normalize_text(url_row.get("last_seen_crawl_date"))
+                    if normalized_crawl_date and (not existing_last_seen or normalized_crawl_date > existing_last_seen):
+                        url_row["last_seen_crawl_date"] = normalized_crawl_date
+                url_row["updated_at_utc"] = now_text
+                target_partition = partition_for_gr_date(url_row.get("gr_date"))
+                if target_partition != url_loc.partition:
+                    raise InvalidTransitionError(
+                        "update_many does not support repartition. "
+                        f"record_key={record_key} current_partition={url_loc.partition} target_partition={target_partition}"
+                    )
+
+                url_rows[url_loc.index] = url_row
+                touched_partitions.add((URL_NS, target_partition))
+
+                has_upload_patch = self._has_upload_patch(record)
+                upload_loc = self._index[UPLOAD_NS].get(record_key)
+                upload_rows: list[dict[str, Any]] | None = None
+                upload_row: dict[str, Any] | None = None
+                if upload_loc is not None:
+                    if upload_loc.partition != target_partition:
+                        raise InvalidTransitionError(
+                            "update_many does not support upload repartition. "
+                            f"record_key={record_key} upload_partition={upload_loc.partition} target_partition={target_partition}"
+                        )
+                    upload_rows = self._read_partition(UPLOAD_NS, upload_loc.partition)
+                    if upload_loc.index >= len(upload_rows):
+                        raise RecordNotFoundError(f"Record not found in upload partition index: {record_key}")
+                    current_upload_row = upload_rows[upload_loc.index]
+                    if self._row_key(current_upload_row) != record_key:
+                        raise RecordNotFoundError(f"Upload index mismatch for record_key={record_key}")
+                    upload_row = _deepcopy_obj(current_upload_row)
+
+                if has_upload_patch or upload_row is not None:
+                    if upload_row is None:
+                        upload_row = self._default_upload_row(record_key, now_text)
+                    self._apply_upload_patch(upload_row, record, now_text)
+                    upload_row["updated_at_utc"] = now_text
+
+                    if upload_loc is None:
+                        upload_rows = self._read_partition(UPLOAD_NS, target_partition)
+                        upload_rows.append(upload_row)
+                        self._index[UPLOAD_NS][record_key] = RecordLocation(
+                            partition=target_partition,
+                            index=len(upload_rows) - 1,
+                        )
+                    else:
+                        assert upload_rows is not None
+                        upload_rows[upload_loc.index] = upload_row
+
+                    touched_partitions.add((UPLOAD_NS, target_partition))
+
+                if "pdf_info" in record:
+                    pdf_loc = self._index[PDF_NS].get(record_key)
+                    created_at = _normalize_text(url_row.get("created_at_utc")) or now_text
+                    if pdf_loc is None:
+                        pdf_row = self._pdf_row_from_pdf_info(record_key, record.get("pdf_info"), now_text, created_at)
+                        pdf_rows = self._read_partition(PDF_NS, target_partition)
+                        pdf_rows.append(pdf_row)
+                        self._index[PDF_NS][record_key] = RecordLocation(
+                            partition=target_partition,
+                            index=len(pdf_rows) - 1,
+                        )
+                    else:
+                        if pdf_loc.partition != target_partition:
+                            raise InvalidTransitionError(
+                                "update_many does not support pdf repartition. "
+                                f"record_key={record_key} pdf_partition={pdf_loc.partition} target_partition={target_partition}"
+                            )
+                        pdf_rows = self._read_partition(PDF_NS, pdf_loc.partition)
+                        if pdf_loc.index >= len(pdf_rows):
+                            raise RecordNotFoundError(f"Record not found in pdf partition index: {record_key}")
+                        current_pdf_row = pdf_rows[pdf_loc.index]
+                        if self._row_key(current_pdf_row) != record_key:
+                            raise RecordNotFoundError(f"PDF index mismatch for record_key={record_key}")
+                        current_created_at = _normalize_text(current_pdf_row.get("created_at_utc"))
+                        if current_created_at:
+                            created_at = current_created_at
+                        pdf_row = self._pdf_row_from_pdf_info(record_key, record.get("pdf_info"), now_text, created_at)
+                        pdf_rows[pdf_loc.index] = pdf_row
+
+                    touched_partitions.add((PDF_NS, target_partition))
+                else:
+                    current_pdf_loc = self._index[PDF_NS].get(record_key)
+                    if current_pdf_loc is not None and current_pdf_loc.partition != target_partition:
+                        raise InvalidTransitionError(
+                            "update_many does not support pdf repartition without pdf_info patch. "
+                            f"record_key={record_key} pdf_partition={current_pdf_loc.partition} target_partition={target_partition}"
+                        )
+
+                results.append(UpsertResult(operation="updated", partition=target_partition, unique_code=record_key))
+
+            for namespace, partition in sorted(touched_partitions):
+                rows = self._read_partition(namespace, partition)
+                self._write_partition(namespace, partition, rows)
+        except Exception:
+            # Rebuild in-memory index/cache from disk to discard staged in-memory mutations.
+            self.refresh_index()
+            raise
+
+        return results
 
     def upsert(
         self,

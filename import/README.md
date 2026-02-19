@@ -15,34 +15,32 @@ Main commands:
 - `baseline-ledger` - build initial ledger from `mahgetGR` and `mahgetAllGR`
 - `append-ledger` - append-only incremental ingest from `mahgetGR` into existing ledger
 - `backfill-lfs-path` - one-time refresh of ledger `lfs_path` based on local PDF files
-- `download-pdfs` - download records with `lfs_path=null`, import every 25 successes, and sync HF
-- `pdf-info` - extract PDF metadata (pages/images/fonts/language/file size) into ledger `pdf_info`
+- `job-download-pdf` - download stage for eligible records
+- `job-import-pdf` - import local PDF folders into `LFS/pdfs` + optional HF sync
+- `job-pdf-info` - extract PDF metadata (pages/images/fonts/language/file size) into ledger `pdf_info`
+- `wrk-download-upload-pdfinfo` - one batch workflow: download PDFs -> upload those files to HF -> compute `pdf_info` for that batch
 - `validate-ledger` - validate schema/state/partition consistency
 - `update-readme-status` - refresh README status table from current ledger
-- `import-pdfs` - one-time import of local PDF folders into `LFS/pdfs` + optional HF sync
-- `job-gr-site` - crawl reconciliation + download stage (`daily|weekly|monthly`)
+- `job-gr-site` - crawl reconciliation only (`daily|weekly|monthly`)
 - `job-wayback` - Wayback SPN2 stage
 - `job-archive` - Archive stage (+ metadata fallback/recovery)
-- `daily`, `weekly`, `monthly` - top-level workflow orchestrators
 - `sync-hf` - sync local artifacts with HF dataset using `huggingface_hub` APIs (upload/download)
 
 ## Make targets
 
 Use `make help` for available targets. Required spec targets:
 
-- `make daily`
-- `make weekly`
-- `make monthly`
 - `make job-gr-site`
 - `make job-wayback`
 - `make job-archive`
+- `make job-download-pdf`
+- `make job-import-pdf`
+- `make job-pdf-info`
+- `make wrk-download-upload-pdfinfo`
 - `make validate`
 - `make status-readme`
-- `make import-pdfs`
 - `make append-ledger`
 - `make backfill-lfs-path`
-- `make download-pdfs`
-- `make pdf-info`
 - `make sync-hf`
 
 ## Credentials
@@ -88,7 +86,7 @@ All local CLI entrypoints auto-load `.env` (searching current directory upward) 
 Use this when you already have downloaded PDFs in a local directory:
 
 ```bash
-python3 import/src/cli.py import-pdfs \
+python3 import/src/cli.py job-import-pdf \
   --source-dir /path/to/existing/pdfs \
   --hf-repo-path LFS/mahGRs
 ```
@@ -110,7 +108,7 @@ Notes:
 
 ## `pdf_info` field
 
-- `pdf-info` reads local PDFs resolved from `lfs_path` (fallback: `download.path`) and stores extracted metadata in `record.pdf_info`.
+- `job-pdf-info` reads local PDFs resolved from `lfs_path` (fallback: `download.path`) and stores extracted metadata in `record.pdf_info`.
 - Requires `pymupdf` (`pip install pymupdf`) in the active environment.
 - Stored metadata includes:
   - `page_count`

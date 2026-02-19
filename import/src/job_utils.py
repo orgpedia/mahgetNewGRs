@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -100,3 +101,38 @@ def detect_service_failure(status_code: int | None, exception: Exception | None 
 
 def ensure_parent_dir(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+
+
+def sha1_file(file_path: Path) -> str:
+    digest = hashlib.sha1()
+    with file_path.open("rb") as handle:
+        while True:
+            chunk = handle.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest().upper()
+
+
+def print_stage_report(
+    label: str,
+    *,
+    selected: int,
+    processed: int,
+    success: int,
+    failed: int,
+    skipped: int,
+    service_failures: int,
+    stopped_early: bool,
+    extras: dict[str, Any] | None = None,
+) -> None:
+    print(f"{label}:")
+    print(f"  selected: {selected}")
+    print(f"  processed: {processed}")
+    print(f"  success: {success}")
+    print(f"  failed: {failed}")
+    print(f"  skipped: {skipped}")
+    for key, value in (extras or {}).items():
+        print(f"  {key}: {value}")
+    print(f"  service_failures: {service_failures}")
+    print(f"  stopped_early: {stopped_early}")

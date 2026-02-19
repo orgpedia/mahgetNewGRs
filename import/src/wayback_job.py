@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from job_utils import detect_service_failure, filter_stage_records, load_code_filter, parse_state_list
+from job_utils import detect_service_failure, filter_stage_records, load_code_filter, parse_state_list, print_stage_report
 from info_store import InfoStore as LedgerStore
 from ledger_engine import RetryLimitExceededError
 from local_env import load_local_env
@@ -337,14 +337,16 @@ def configure_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser
 
 
 def _print_report(report: WaybackJobReport) -> None:
-    print("Wayback job:")
-    print(f"  selected: {report.selected}")
-    print(f"  processed: {report.processed}")
-    print(f"  success: {report.success}")
-    print(f"  failed: {report.failed}")
-    print(f"  skipped: {report.skipped}")
-    print(f"  service_failures: {report.service_failures}")
-    print(f"  stopped_early: {report.stopped_early}")
+    print_stage_report(
+        "Wayback job",
+        selected=report.selected,
+        processed=report.processed,
+        success=report.success,
+        failed=report.failed,
+        skipped=report.skipped,
+        service_failures=report.service_failures,
+        stopped_early=report.stopped_early,
+    )
 
 
 def run_from_args(args: argparse.Namespace) -> int:
