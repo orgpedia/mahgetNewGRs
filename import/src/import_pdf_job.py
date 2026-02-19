@@ -14,7 +14,7 @@ from typing import Any
 from department_codes import department_code_from_name
 from import_config import load_import_config
 from info_store import InfoStore as LedgerStore
-from job_utils import sha1_file
+from job_utils import is_record_within_lookback, sha1_file
 from ledger_engine import to_ledger_relative_path
 from local_env import load_local_env
 from sync_hf_job import SyncHFConfig, SyncHFError, resolve_hf_repo_path, run_sync_hf
@@ -29,6 +29,7 @@ class ImportPdfStageConfig:
     source_dir: Path
     ledger_dir: Path
     lfs_pdf_root: Path
+    lookback_days: int
     recursive: bool
     overwrite: bool
     dry_run: bool
@@ -44,6 +45,7 @@ class ImportPdfStageReport:
     skipped_non_pdf: int = 0
     skipped_no_unique_code: int = 0
     missing_ledger_record: int = 0
+    skipped_lookback: int = 0
 
 
 def clean_text(value: Any) -> str:
@@ -128,6 +130,10 @@ def run_import_pdf_stage(config: ImportPdfStageConfig) -> ImportPdfStageReport:
             report.missing_ledger_record += 1
             continue
 
+        if not is_record_within_lookback(record, config.lookback_days):
+            report.skipped_lookback += 1
+            continue
+
         record_department = clean_text(record.get("department_code"))
         if not record_department:
             record_department = clean_text(record.get("department_name"))
@@ -177,6 +183,7 @@ def print_import_pdf_stage_report(report: ImportPdfStageReport) -> None:
     print(f"  skipped_non_pdf: {report.skipped_non_pdf}")
     print(f"  skipped_no_unique_code: {report.skipped_no_unique_code}")
     print(f"  missing_ledger_record: {report.missing_ledger_record}")
+    print(f"  skipped_lookback: {report.skipped_lookback}")
 
 
 @dataclass(frozen=True)
@@ -245,6 +252,12 @@ def configure_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser
     parser.add_argument("--source-dir", required=True, help="Directory containing PDF files to import")
     parser.add_argument("--ledger-dir", default="import/grinfo", help="Ledger root directory for department and gr_date lookup")
     parser.add_argument("--lfs-pdf-root", default="LFS/pdfs", help="LFS PDF root directory")
+    parser.add_argument(
+        "--lookback-days",
+        type=int,
+        default=0,
+        help="Use only ledger records dated within the last N days (0 means no date filter)",
+    )
     parser.add_argument("--no-recursive", action="store_true", help="Do not recurse under source directory")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite destination PDF when hashes differ")
     parser.add_argument("--dry-run", action="store_true", help="Plan actions without writing files")
@@ -281,6 +294,7 @@ def run_from_args(args: argparse.Namespace) -> int:
             source_dir=Path(args.source_dir).resolve(),
             ledger_dir=Path(args.ledger_dir).resolve(),
             lfs_pdf_root=Path(args.lfs_pdf_root).resolve(),
+            lookback_days=max(0, args.lookback_days),
             recursive=not args.no_recursive,
             overwrite=args.overwrite,
             dry_run=args.dry_run,

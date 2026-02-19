@@ -32,6 +32,7 @@ class SPN2ClientError(Exception):
 class WaybackJobConfig:
     ledger_dir: Path
     max_records: int
+    lookback_days: int
     dry_run: bool
     timeout_sec: int
     poll_interval_sec: float
@@ -238,6 +239,7 @@ def run_wayback_job(config: WaybackJobConfig) -> WaybackJobReport:
         stage="wayback",
         code_filter=config.code_filter,
         max_attempts=2,
+        lookback_days=config.lookback_days,
     )
     report.selected = len(candidates)
     limit = config.max_records if config.max_records > 0 else len(candidates)
@@ -306,6 +308,12 @@ def configure_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser
     parser.add_argument("--code", action="append", default=[], help="Explicit unique_code values to process")
     parser.add_argument("--allowed-state", action="append", default=[], help="Override allowed states")
     parser.add_argument("--max-records", type=int, default=0, help="Optional cap on number of records processed")
+    parser.add_argument(
+        "--lookback-days",
+        type=int,
+        default=0,
+        help="Process only records dated within the last N days (0 means no date filter)",
+    )
     parser.add_argument("--timeout-sec", type=int, default=30, help="HTTP timeout seconds")
     parser.add_argument("--poll-interval-sec", type=float, default=1.5, help="SPN2 poll interval seconds")
     parser.add_argument("--poll-timeout-sec", type=int, default=90, help="SPN2 poll timeout seconds")
@@ -358,6 +366,7 @@ def run_from_args(args: argparse.Namespace) -> int:
     config = WaybackJobConfig(
         ledger_dir=Path(args.ledger_dir).resolve(),
         max_records=max(0, args.max_records),
+        lookback_days=max(0, args.lookback_days),
         dry_run=args.dry_run,
         timeout_sec=max(1, args.timeout_sec),
         poll_interval_sec=max(0.1, args.poll_interval_sec),

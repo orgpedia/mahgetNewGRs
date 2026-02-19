@@ -50,7 +50,6 @@ MUTABLE_FIELDS = {
     "archive",
     "pdf_info",
     "last_seen_crawl_date",
-    "updated_at_utc",
 }
 
 ALLOWED_TRANSITIONS: dict[str, set[str]] = {
@@ -430,7 +429,6 @@ class LedgerStore:
                 updated_record["last_seen_crawl_date"] = candidate_last_seen.isoformat()
 
         self._validate_attempt_counts_non_decreasing(current_record, updated_record)
-        updated_record["updated_at_utc"] = now_text
         self._validate_attempt_counts(updated_record)
         self._validate_state(updated_record)
 
@@ -547,7 +545,6 @@ class LedgerStore:
         )
         StateMachine.validate_transition(record.get("state", STATE_FETCHED), next_state)
         record["state"] = next_state
-        record["updated_at_utc"] = utc_now_text()
 
         return self.upsert(record)
 

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import os
+import signal
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -16,10 +18,20 @@ from job_utils import load_code_filter, parse_state_list, print_stage_report
 from local_env import load_local_env
 
 
+DEFAULT_MAX_RUNTIME_MINUTES = 345
+
+
+class WorkflowTimeoutError(RuntimeError):
+    pass
+
+
 @dataclass(frozen=True)
 class DownloadUploadPdfInfoWorkflowConfig:
     ledger_dir: Path
     batch_size: int
+    max_records: int
+    max_runtime_minutes: int
+    lookback_days: int
     timeout_sec: int
     service_failure_limit: int
     dry_run: bool
@@ -38,14 +50,66 @@ class DownloadUploadPdfInfoWorkflowConfig:
     pdf_force: bool = False
     pdf_mark_missing: bool = False
     pdf_verbose: bool = False
+    verbose: bool = False
 
 
 @dataclass
 class DownloadUploadPdfInfoWorkflowReport:
-    download_report: download_pdf_job.DownloadStageReport
-    batch_success_codes: list[str] = field(default_factory=list)
-    batch_upload_files: int = 0
-    pdf_info_report: pdf_info_job.PdfInfoReport | None = None
+    batches_run: int = 0
+    stop_reason: str = ""
+    total_download_selected: int = 0
+    total_download_processed: int = 0
+    total_download_success: int = 0
+    total_download_failed: int = 0
+    total_download_skipped: int = 0
+    total_download_service_failures: int = 0
+    total_batch_success_with_files: int = 0
+    total_uploaded_files: int = 0
+    total_pdf_info_processed: int = 0
+    total_pdf_info_updated: int = 0
+    total_deleted_files: int = 0
+    total_cleanup_skipped: int = 0
+    last_download_report: download_pdf_job.DownloadStageReport | None = None
+    last_pdf_info_report: pdf_info_job.PdfInfoReport | None = None
+
+
+def _runtime_seconds(max_runtime_minutes: int) -> int:
+    minutes = max(0, int(max_runtime_minutes))
+    return minutes * 60
+
+
+def _install_runtime_alarm(max_runtime_seconds: int):
+    if max_runtime_seconds <= 0 or not hasattr(signal, "SIGALRM"):
+        return None
+
+    previous_handler = signal.getsignal(signal.SIGALRM)
+
+    def _alarm_handler(_signum, _frame):
+        raise WorkflowTimeoutError(
+            "reached max runtime limit "
+            f"({max_runtime_seconds} seconds)"
+        )
+
+    signal.signal(signal.SIGALRM, _alarm_handler)
+    signal.alarm(max_runtime_seconds)
+    return previous_handler
+
+
+def _clear_runtime_alarm(previous_handler) -> None:
+    if previous_handler is None or not hasattr(signal, "SIGALRM"):
+        return
+    signal.alarm(0)
+    signal.signal(signal.SIGALRM, previous_handler)
+
+
+def _check_deadline(deadline_monotonic: float | None, max_runtime_seconds: int) -> None:
+    if deadline_monotonic is None:
+        return
+    if time.monotonic() >= deadline_monotonic:
+        raise WorkflowTimeoutError(
+            "reached max runtime limit "
+            f"({max_runtime_seconds} seconds)"
+        )
 
 
 def _dedupe_keep_order(values: list[str]) -> list[str]:
@@ -58,6 +122,35 @@ def _dedupe_keep_order(values: list[str]) -> list[str]:
         seen.add(code)
         output.append(code)
     return output
+
+
+def _verbose_log(config: DownloadUploadPdfInfoWorkflowConfig, message: str) -> None:
+    if config.verbose:
+        print(f"[verbose] {message}")
+
+
+def _verbose_preview_codes(config: DownloadUploadPdfInfoWorkflowConfig, label: str, codes: list[str], limit: int = 25) -> None:
+    if not config.verbose:
+        return
+    if not codes:
+        print(f"[verbose] {label}: 0")
+        return
+    shown = codes[: max(0, limit)]
+    print(f"[verbose] {label}: {len(codes)} (showing {len(shown)})")
+    for code in shown:
+        print(f"[verbose]   {code}")
+
+
+def _verbose_preview_paths(config: DownloadUploadPdfInfoWorkflowConfig, label: str, paths: tuple[str, ...], limit: int = 25) -> None:
+    if not config.verbose:
+        return
+    if not paths:
+        print(f"[verbose] {label}: 0")
+        return
+    shown = list(paths[: max(0, limit)])
+    print(f"[verbose] {label}: {len(paths)} (showing {len(shown)})")
+    for path in shown:
+        print(f"[verbose]   {path}")
 
 
 def _resolve_existing_file(path_value: str) -> Path | None:
@@ -132,7 +225,9 @@ def _run_upload_batch(config: DownloadUploadPdfInfoWorkflowConfig, file_paths: l
         print("Upload stage: nothing to upload for this batch.")
         return 0
 
+    _verbose_log(config, f"upload input files: {len(file_paths)}")
     relative_paths = _to_hf_relative_paths(file_paths, config.hf_repo_path)
+    _verbose_preview_paths(config, "upload relative paths", relative_paths)
     sync_config = sync_hf_job.SyncHFConfig(
         source_root=Path(".").resolve(),
         hf_repo_path=config.hf_repo_path,
@@ -153,74 +248,209 @@ def _run_upload_batch(config: DownloadUploadPdfInfoWorkflowConfig, file_paths: l
     return len(relative_paths)
 
 
+def _cleanup_batch_files(config: DownloadUploadPdfInfoWorkflowConfig, file_paths: list[Path]) -> tuple[int, int]:
+    if config.dry_run or not file_paths:
+        return 0, 0
+
+    root = config.lfs_root.resolve()
+    removed = 0
+    skipped = 0
+    seen: set[str] = set()
+    for file_path in file_paths:
+        try:
+            resolved = file_path.resolve()
+        except Exception:
+            skipped += 1
+            continue
+
+        key = str(resolved)
+        if key in seen:
+            continue
+        seen.add(key)
+
+        try:
+            resolved.relative_to(root)
+        except ValueError:
+            skipped += 1
+            _verbose_log(config, f"[skip cleanup] outside lfs-root: {resolved}")
+            continue
+
+        if not resolved.exists():
+            continue
+        if not resolved.is_file():
+            skipped += 1
+            _verbose_log(config, f"[skip cleanup] not a regular file: {resolved}")
+            continue
+
+        try:
+            resolved.unlink()
+            removed += 1
+            _verbose_log(config, f"[cleanup] removed {resolved}")
+        except Exception as exc:
+            skipped += 1
+            _verbose_log(config, f"[cleanup error] {resolved}: {exc}")
+            continue
+
+        parent = resolved.parent
+        while parent != root:
+            try:
+                parent.rmdir()
+            except OSError:
+                break
+            parent = parent.parent
+
+    return removed, skipped
+
+
 def run_workflow(config: DownloadUploadPdfInfoWorkflowConfig) -> tuple[int, DownloadUploadPdfInfoWorkflowReport | None]:
+    max_runtime_seconds = _runtime_seconds(config.max_runtime_minutes)
+    deadline_monotonic = time.monotonic() + max_runtime_seconds if max_runtime_seconds > 0 else None
+
     print("Workflow: download -> upload -> pdf-info")
     print(f"Batch size: {config.batch_size}")
+    print(f"Max records: {config.max_records}")
+    print(f"Max runtime minutes: {config.max_runtime_minutes}")
+    _check_deadline(deadline_monotonic, max_runtime_seconds)
+    _verbose_log(config, f"ledger_dir={config.ledger_dir}")
+    _verbose_log(config, f"lfs_root={config.lfs_root}")
+    _verbose_log(config, f"hf_repo_path={config.hf_repo_path}")
+    _verbose_log(config, f"hf_repo_id={config.hf_repo_id}")
+    _verbose_log(config, f"dry_run={config.dry_run} skip_upload={config.skip_upload}")
+    _verbose_log(config, f"max_runtime_seconds={max_runtime_seconds}")
+    _verbose_log(config, f"lookback_days={config.lookback_days}")
+    _verbose_log(config, f"allowed_states={sorted(config.allowed_states)}")
+    _verbose_log(config, f"code_filter_size={len(config.code_filter)}")
 
-    download_config = download_pdf_job.DownloadStageConfig(
-        ledger_dir=config.ledger_dir,
-        lfs_root=config.lfs_root,
-        timeout_sec=max(1, config.timeout_sec),
-        service_failure_limit=max(1, config.service_failure_limit),
-        max_records=max(0, config.batch_size),
-        dry_run=config.dry_run,
-        code_filter=config.code_filter,
-        allowed_states=config.allowed_states,
-    )
-    download_report = download_pdf_job.run_download_stage(download_config)
-    print_stage_report(
-        "Download stage",
-        selected=download_report.selected,
-        processed=download_report.processed,
-        success=download_report.success,
-        failed=download_report.failed,
-        skipped=download_report.skipped,
-        service_failures=download_report.service_failures,
-        stopped_early=download_report.stopped_early,
-    )
+    report = DownloadUploadPdfInfoWorkflowReport()
+    batch_index = 0
 
-    success_codes, file_paths = _collect_batch_files(
-        ledger_dir=config.ledger_dir,
-        processed_codes=download_report.processed_codes,
-    )
-    print(f"Batch success records with local PDFs: {len(success_codes)}")
+    while True:
+        _check_deadline(deadline_monotonic, max_runtime_seconds)
+        if config.max_records > 0 and report.total_download_processed >= config.max_records:
+            report.stop_reason = "max_records_reached"
+            print(f"Reached max-records limit ({config.max_records}). Stopping workflow.")
+            return 0, report
 
-    report = DownloadUploadPdfInfoWorkflowReport(
-        download_report=download_report,
-        batch_success_codes=success_codes,
-    )
+        remaining_records = config.max_records - report.total_download_processed if config.max_records > 0 else 0
+        if config.batch_size > 0:
+            batch_limit = config.batch_size
+            if config.max_records > 0:
+                batch_limit = min(batch_limit, max(0, remaining_records))
+        else:
+            batch_limit = max(0, remaining_records) if config.max_records > 0 else 0
 
-    if not success_codes:
-        print("No successful downloaded files in this batch. Skipping upload and pdf-info.")
-        return 0, report
+        batch_index += 1
+        print(f"Batch #{batch_index}")
 
-    try:
-        uploaded_files = _run_upload_batch(config, file_paths)
-    except sync_hf_job.SyncHFError as exc:
-        print(f"Upload stage failed: {exc}")
-        return 1, report
-
-    report.batch_upload_files = uploaded_files
-
-    try:
-        pdf_report = pdf_info_job.run_pdf_info_stage(
-            pdf_info_job.PdfInfoConfig(
-                ledger_dir=config.ledger_dir,
-                max_records=max(0, len(success_codes)),
-                dry_run=config.dry_run,
-                force=config.pdf_force,
-                mark_missing=config.pdf_mark_missing,
-                verbose=config.pdf_verbose,
-                code_filter=set(success_codes),
-            )
+        download_config = download_pdf_job.DownloadStageConfig(
+            ledger_dir=config.ledger_dir,
+            lfs_root=config.lfs_root,
+            timeout_sec=max(1, config.timeout_sec),
+            service_failure_limit=max(1, config.service_failure_limit),
+            max_records=max(0, batch_limit),
+            lookback_days=max(0, config.lookback_days),
+            dry_run=config.dry_run,
+            code_filter=config.code_filter,
+            allowed_states=config.allowed_states,
         )
-    except pdf_info_job.PdfInfoDependencyError as exc:
-        print(f"pdf-info stage failed: {exc}")
-        return 2, report
+        download_report = download_pdf_job.run_download_stage(download_config)
+        report.batches_run = batch_index
+        report.last_download_report = download_report
+        report.total_download_selected += download_report.selected
+        report.total_download_processed += download_report.processed
+        report.total_download_success += download_report.success
+        report.total_download_failed += download_report.failed
+        report.total_download_skipped += download_report.skipped
+        report.total_download_service_failures += download_report.service_failures
 
-    report.pdf_info_report = pdf_report
-    pdf_info_job.print_pdf_info_stage_report(pdf_report, dry_run=config.dry_run)
-    return 0, report
+        print_stage_report(
+            "Download stage",
+            selected=download_report.selected,
+            processed=download_report.processed,
+            success=download_report.success,
+            failed=download_report.failed,
+            skipped=download_report.skipped,
+            service_failures=download_report.service_failures,
+            stopped_early=download_report.stopped_early,
+        )
+        _verbose_preview_codes(config, "download processed codes", download_report.processed_codes)
+
+        if download_report.selected == 0:
+            report.stop_reason = "no_eligible_records"
+            print("No eligible records remain. Stopping workflow.")
+            return 0, report
+
+        _check_deadline(deadline_monotonic, max_runtime_seconds)
+        success_codes, file_paths = _collect_batch_files(
+            ledger_dir=config.ledger_dir,
+            processed_codes=download_report.processed_codes,
+        )
+        report.total_batch_success_with_files += len(success_codes)
+        print(f"Batch success records with local PDFs: {len(success_codes)}")
+        _verbose_preview_codes(config, "batch success codes", success_codes)
+        if config.verbose and success_codes:
+            show_count = min(len(success_codes), 25)
+            print(f"[verbose] success code -> file path (showing {show_count})")
+            for code, path in list(zip(success_codes, file_paths))[:show_count]:
+                print(f"[verbose]   {code} -> {path}")
+
+        if not success_codes:
+            print("No successful downloaded files in this batch. Skipping upload and pdf-info for this batch.")
+            if config.dry_run:
+                report.stop_reason = "dry_run_single_batch"
+                print("Dry-run mode keeps candidate state unchanged; stopping after one batch.")
+                return 0, report
+            if download_report.processed == 0:
+                report.stop_reason = "no_progress"
+                print("No actionable records were processed in this batch. Stopping to avoid an infinite loop.")
+                return 0, report
+            continue
+
+        _check_deadline(deadline_monotonic, max_runtime_seconds)
+        try:
+            uploaded_files = _run_upload_batch(config, file_paths)
+        except sync_hf_job.SyncHFError as exc:
+            print(f"Upload stage failed: {exc}")
+            report.stop_reason = "upload_failed"
+            return 1, report
+        report.total_uploaded_files += uploaded_files
+
+        _verbose_log(config, f"running pdf-info for {len(success_codes)} records")
+        if config.verbose and not config.pdf_verbose:
+            print("[skip filter] non-batch records are filtered out (enable --pdf-verbose for full per-record logs)")
+        _check_deadline(deadline_monotonic, max_runtime_seconds)
+        try:
+            pdf_report = pdf_info_job.run_pdf_info_stage(
+                pdf_info_job.PdfInfoConfig(
+                    ledger_dir=config.ledger_dir,
+                    max_records=max(0, len(success_codes)),
+                    lookback_days=max(0, config.lookback_days),
+                    dry_run=config.dry_run,
+                    force=config.pdf_force,
+                    mark_missing=config.pdf_mark_missing,
+                    verbose=config.pdf_verbose,
+                    code_filter=set(success_codes),
+                )
+            )
+        except pdf_info_job.PdfInfoDependencyError as exc:
+            print(f"pdf-info stage failed: {exc}")
+            report.stop_reason = "pdf_info_failed"
+            return 2, report
+
+        report.last_pdf_info_report = pdf_report
+        report.total_pdf_info_processed += pdf_report.processed_records
+        report.total_pdf_info_updated += pdf_report.updated_records
+        pdf_info_job.print_pdf_info_stage_report(pdf_report, dry_run=config.dry_run)
+
+        deleted_files, skipped_cleanup = _cleanup_batch_files(config, file_paths)
+        report.total_deleted_files += deleted_files
+        report.total_cleanup_skipped += skipped_cleanup
+        print(f"Cleanup stage: removed={deleted_files} skipped={skipped_cleanup}")
+
+        if config.dry_run:
+            report.stop_reason = "dry_run_single_batch"
+            print("Dry-run mode keeps candidate state unchanged; stopping after one batch.")
+            return 0, report
 
 
 def configure_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
@@ -228,7 +458,20 @@ def configure_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser
 
     parser.description = "Run one batch workflow: download PDFs, upload those PDFs to HF, then compute pdf_info."
     parser.add_argument("--ledger-dir", default="import/grinfo", help="Ledger root directory (supports split ledgers)")
-    parser.add_argument("--batch-size", type=int, default=100, help="Maximum records in one workflow batch")
+    parser.add_argument("--batch-size", type=int, default=25, help="Maximum records in one workflow batch")
+    parser.add_argument("--max-records", type=int, default=0, help="Optional cap on total records processed across batches")
+    parser.add_argument(
+        "--max-runtime-minutes",
+        type=int,
+        default=DEFAULT_MAX_RUNTIME_MINUTES,
+        help="Stop workflow once runtime reaches N minutes (default: 345 = 5h45m; 0 disables)",
+    )
+    parser.add_argument(
+        "--lookback-days",
+        type=int,
+        default=0,
+        help="Process only records dated within the last N days (0 means no date filter)",
+    )
     parser.add_argument(
         "--lfs-root",
         default="",
@@ -275,6 +518,7 @@ def configure_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser
     parser.add_argument("--pdf-force", action="store_true", help="Recompute pdf_info even when status is already success")
     parser.add_argument("--pdf-mark-missing", action="store_true", help="Mark pdf_info as missing_pdf when local file is absent")
     parser.add_argument("--pdf-verbose", action="store_true", help="Verbose per-record logs for pdf-info stage")
+    parser.add_argument("--verbose", action="store_true", help="Verbose workflow progress logging")
     return parser
 
 
@@ -293,6 +537,9 @@ def run_from_args(args: argparse.Namespace) -> int:
     config = DownloadUploadPdfInfoWorkflowConfig(
         ledger_dir=Path(args.ledger_dir).resolve(),
         batch_size=max(0, args.batch_size),
+        max_records=max(0, args.max_records),
+        max_runtime_minutes=max(0, args.max_runtime_minutes),
+        lookback_days=max(0, args.lookback_days),
         timeout_sec=max(1, args.timeout_sec),
         service_failure_limit=max(1, args.service_failure_limit),
         dry_run=args.dry_run,
@@ -311,17 +558,32 @@ def run_from_args(args: argparse.Namespace) -> int:
         pdf_force=args.pdf_force,
         pdf_mark_missing=args.pdf_mark_missing,
         pdf_verbose=args.pdf_verbose,
+        verbose=args.verbose,
     )
-    exit_code, report = run_workflow(config)
+    previous_alarm = _install_runtime_alarm(_runtime_seconds(config.max_runtime_minutes))
+    try:
+        exit_code, report = run_workflow(config)
+    except WorkflowTimeoutError as exc:
+        print(f"workflow timeout: {exc}")
+        return 124
+    finally:
+        _clear_runtime_alarm(previous_alarm)
     if report is not None:
         print("Workflow summary:")
-        print(f"  downloaded_processed: {report.download_report.processed}")
-        print(f"  downloaded_success: {report.download_report.success}")
-        print(f"  batch_success_with_files: {len(report.batch_success_codes)}")
-        print(f"  uploaded_files: {report.batch_upload_files}")
-        if report.pdf_info_report is not None:
-            print(f"  pdf_info_processed: {report.pdf_info_report.processed_records}")
-            print(f"  pdf_info_updated: {report.pdf_info_report.updated_records}")
+        print(f"  batches_run: {report.batches_run}")
+        print(f"  stop_reason: {report.stop_reason or 'completed'}")
+        print(f"  total_download_selected: {report.total_download_selected}")
+        print(f"  total_download_processed: {report.total_download_processed}")
+        print(f"  total_download_success: {report.total_download_success}")
+        print(f"  total_download_failed: {report.total_download_failed}")
+        print(f"  total_download_skipped: {report.total_download_skipped}")
+        print(f"  total_download_service_failures: {report.total_download_service_failures}")
+        print(f"  total_batch_success_with_files: {report.total_batch_success_with_files}")
+        print(f"  total_uploaded_files: {report.total_uploaded_files}")
+        print(f"  total_pdf_info_processed: {report.total_pdf_info_processed}")
+        print(f"  total_pdf_info_updated: {report.total_pdf_info_updated}")
+        print(f"  total_deleted_files: {report.total_deleted_files}")
+        print(f"  total_cleanup_skipped: {report.total_cleanup_skipped}")
     return exit_code
 
 

@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from info_store import InfoStore as LedgerStore
+from job_utils import is_record_within_lookback
 from ledger_engine import partition_for_gr_date, to_ledger_relative_path
 from local_env import load_local_env
 
@@ -43,6 +44,7 @@ class PdfInfoDependencyError(RuntimeError):
 class PdfInfoConfig:
     ledger_dir: Path
     max_records: int
+    lookback_days: int
     dry_run: bool
     force: bool
     mark_missing: bool
@@ -58,6 +60,7 @@ class PdfInfoReport:
     unchanged_records: int = 0
     skipped_already_success: int = 0
     skipped_no_local_pdf: int = 0
+    skipped_lookback: int = 0
     extraction_failed: int = 0
     partitions_changed: int = 0
 
@@ -476,6 +479,11 @@ def run_pdf_info_stage(config: PdfInfoConfig) -> PdfInfoReport:
             _verbose_log(config, f"[skip invalid] {label}")
             continue
 
+        if not is_record_within_lookback(record, config.lookback_days):
+            report.skipped_lookback += 1
+            _verbose_log(config, f"[skip lookback] {label}")
+            continue
+
         if config.code_filter and unique_code not in config.code_filter:
             _verbose_log(config, f"[skip filter] {label}")
             continue
@@ -549,6 +557,7 @@ def print_pdf_info_stage_report(report: PdfInfoReport, *, dry_run: bool) -> None
     print(f"  unchanged_records: {report.unchanged_records}")
     print(f"  skipped_already_success: {report.skipped_already_success}")
     print(f"  skipped_no_local_pdf: {report.skipped_no_local_pdf}")
+    print(f"  skipped_lookback: {report.skipped_lookback}")
     print(f"  extraction_failed: {report.extraction_failed}")
     print(f"  partitions_changed: {report.partitions_changed}")
 
@@ -565,6 +574,12 @@ def configure_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser
         default=0,
         help="Maximum records to process (0 means no limit)",
     )
+    parser.add_argument(
+        "--lookback-days",
+        type=int,
+        default=0,
+        help="Process only records dated within the last N days (0 means no date filter)",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Compute/report changes without writing ledger files")
     parser.add_argument("--force", action="store_true", help="Recompute even when pdf_info.status is already success")
     parser.add_argument(
@@ -580,6 +595,7 @@ def run_from_args(args: argparse.Namespace) -> int:
     config = PdfInfoConfig(
         ledger_dir=Path(args.ledger_dir).resolve(),
         max_records=max(0, args.max_records),
+        lookback_days=max(0, args.lookback_days),
         dry_run=args.dry_run,
         force=args.force,
         mark_missing=args.mark_missing,

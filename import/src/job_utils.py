@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import date, datetime, timedelta, timezone
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
@@ -61,6 +62,38 @@ def parse_state_list(values: Iterable[str] | None) -> set[str]:
     return {value.strip() for value in values if value and value.strip()}
 
 
+def _parse_date(value: Any) -> date | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    # Handle plain ISO date and ISO datetime values.
+    if len(text) >= 10 and text[4] == "-" and text[7] == "-":
+        candidate = text[:10]
+        try:
+            return date.fromisoformat(candidate)
+        except ValueError:
+            return None
+    for fmt in ("%d-%m-%Y", "%d/%m/%Y"):
+        try:
+            return datetime.strptime(text, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def is_record_within_lookback(record: dict[str, Any], lookback_days: int) -> bool:
+    days = max(0, int(lookback_days))
+    if days == 0:
+        return True
+
+    cutoff = datetime.now(timezone.utc).date() - timedelta(days=days)
+    for field_name in ("last_seen_crawl_date", "first_seen_crawl_date", "gr_date"):
+        parsed = _parse_date(record.get(field_name))
+        if parsed is not None and parsed >= cutoff:
+            return True
+    return False
+
+
 def filter_stage_records(
     store: LedgerStore,
     *,
@@ -68,6 +101,7 @@ def filter_stage_records(
     stage: str,
     code_filter: set[str] | None = None,
     max_attempts: int = 2,
+    lookback_days: int = 0,
 ) -> list[StageRecord]:
     selected: list[StageRecord] = []
     codes = code_filter or set()
@@ -76,6 +110,8 @@ def filter_stage_records(
         if not unique_code:
             continue
         if codes and unique_code not in codes:
+            continue
+        if not is_record_within_lookback(record, lookback_days):
             continue
         state = str(record.get("state", "")).strip()
         if allowed_states and state not in allowed_states:

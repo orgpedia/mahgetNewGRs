@@ -291,7 +291,6 @@ class InfoStore:
             "gr_date",
             "source_url",
             "last_seen_crawl_date",
-            "updated_at_utc",
         }
         immutable = {"record_key", "unique_code", "created_at_utc", "first_seen_crawl_date", "first_seen_run_type"}
         for key, value in incoming.items():
@@ -344,12 +343,20 @@ class InfoStore:
     def _has_upload_patch(self, record: dict[str, Any]) -> bool:
         return any(key in record for key in ("state", "download", "wayback", "archive", "hf", "lfs_path", "attempt_counts"))
 
-    def _pdf_row_from_pdf_info(self, record_key: str, pdf_info: Any, now_text: str, created_at: str) -> dict[str, Any]:
+    def _pdf_row_from_pdf_info(
+        self,
+        record_key: str,
+        pdf_info: Any,
+        now_text: str,
+        created_at: str,
+        updated_at: str | None = None,
+    ) -> dict[str, Any]:
+        updated_value = _normalize_text(updated_at) or now_text
         base = {
             "record_key": record_key,
             "status": "not_attempted",
             "created_at_utc": created_at,
-            "updated_at_utc": now_text,
+            "updated_at_utc": updated_value,
         }
         if not isinstance(pdf_info, dict):
             return base
@@ -508,14 +515,12 @@ class InfoStore:
 
         url_row = self._default_url_row(record_key, now_text, normalized_crawl_date, normalized_run_type)
         self._apply_url_patch(url_row, record, is_insert=True)
-        url_row["updated_at_utc"] = now_text
         partition = partition_for_gr_date(url_row.get("gr_date"))
         self._upsert_namespace_row(URL_NS, record_key, partition, url_row)
 
         if self._has_upload_patch(record):
             upload_row = self._default_upload_row(record_key, now_text)
             self._apply_upload_patch(upload_row, record, now_text)
-            upload_row["updated_at_utc"] = now_text
             self._upsert_namespace_row(UPLOAD_NS, record_key, partition, upload_row)
 
         if "pdf_info" in record:
@@ -580,7 +585,6 @@ class InfoStore:
                     existing_last_seen = _normalize_text(url_row.get("last_seen_crawl_date"))
                     if normalized_crawl_date and (not existing_last_seen or normalized_crawl_date > existing_last_seen):
                         url_row["last_seen_crawl_date"] = normalized_crawl_date
-                url_row["updated_at_utc"] = now_text
                 target_partition = partition_for_gr_date(url_row.get("gr_date"))
                 if target_partition != url_loc.partition:
                     raise InvalidTransitionError(
@@ -613,7 +617,6 @@ class InfoStore:
                     if upload_row is None:
                         upload_row = self._default_upload_row(record_key, now_text)
                     self._apply_upload_patch(upload_row, record, now_text)
-                    upload_row["updated_at_utc"] = now_text
 
                     if upload_loc is None:
                         upload_rows = self._read_partition(UPLOAD_NS, target_partition)
@@ -654,7 +657,13 @@ class InfoStore:
                         current_created_at = _normalize_text(current_pdf_row.get("created_at_utc"))
                         if current_created_at:
                             created_at = current_created_at
-                        pdf_row = self._pdf_row_from_pdf_info(record_key, record.get("pdf_info"), now_text, created_at)
+                        pdf_row = self._pdf_row_from_pdf_info(
+                            record_key,
+                            record.get("pdf_info"),
+                            now_text,
+                            created_at,
+                            updated_at=_normalize_text(current_pdf_row.get("updated_at_utc")) or created_at,
+                        )
                         pdf_rows[pdf_loc.index] = pdf_row
 
                     touched_partitions.add((PDF_NS, target_partition))
@@ -697,7 +706,6 @@ class InfoStore:
         if existing_url is None:
             url_row = self._default_url_row(record_key, now_text, normalized_crawl_date, normalized_run_type)
             self._apply_url_patch(url_row, record, is_insert=True)
-            url_row["updated_at_utc"] = now_text
             partition = partition_for_gr_date(url_row.get("gr_date"))
             self._upsert_namespace_row(URL_NS, record_key, partition, url_row)
 
@@ -705,7 +713,6 @@ class InfoStore:
             if has_upload_patch:
                 upload_row = self._default_upload_row(record_key, now_text)
                 self._apply_upload_patch(upload_row, record, now_text)
-                upload_row["updated_at_utc"] = now_text
                 self._upsert_namespace_row(UPLOAD_NS, record_key, partition, upload_row)
 
             if "pdf_info" in record:
@@ -725,7 +732,6 @@ class InfoStore:
             existing_last_seen = _normalize_text(url_row.get("last_seen_crawl_date"))
             if normalized_crawl_date and (not existing_last_seen or normalized_crawl_date > existing_last_seen):
                 url_row["last_seen_crawl_date"] = normalized_crawl_date
-        url_row["updated_at_utc"] = now_text
         target_partition = partition_for_gr_date(url_row.get("gr_date"))
         self._upsert_namespace_row(URL_NS, record_key, target_partition, url_row)
 
@@ -735,13 +741,19 @@ class InfoStore:
             if upload_row is None:
                 upload_row = self._default_upload_row(record_key, now_text)
             self._apply_upload_patch(upload_row, record, now_text)
-            upload_row["updated_at_utc"] = now_text
             self._upsert_namespace_row(UPLOAD_NS, record_key, target_partition, upload_row)
 
         if "pdf_info" in record:
             current_pdf = self._find_row(PDF_NS, record_key)
             created_at = _normalize_text((current_pdf or {}).get("created_at_utc")) or _normalize_text(url_row.get("created_at_utc")) or now_text
-            pdf_row = self._pdf_row_from_pdf_info(record_key, record.get("pdf_info"), now_text, created_at)
+            existing_updated_at = _normalize_text((current_pdf or {}).get("updated_at_utc")) or created_at
+            pdf_row = self._pdf_row_from_pdf_info(
+                record_key,
+                record.get("pdf_info"),
+                now_text,
+                created_at,
+                updated_at=existing_updated_at,
+            )
             self._upsert_namespace_row(PDF_NS, record_key, target_partition, pdf_row)
         else:
             current_pdf = self._find_row(PDF_NS, record_key)
@@ -774,7 +786,6 @@ class InfoStore:
         if upload_row is None:
             created_at = _normalize_text(existing.get("created_at_utc")) or now_text
             upload_row = self._default_upload_row(record_key, created_at)
-            upload_row["updated_at_utc"] = now_text
 
         stage_obj = upload_row.get(stage)
         if not isinstance(stage_obj, dict):
@@ -848,7 +859,6 @@ class InfoStore:
         )
         StateMachine.validate_transition(current_state, next_state)
         upload_row["state"] = next_state
-        upload_row["updated_at_utc"] = now_text
 
         self._upsert_namespace_row(UPLOAD_NS, record_key, url_partition, upload_row)
         return UpsertResult(operation="updated", partition=url_partition, unique_code=record_key)

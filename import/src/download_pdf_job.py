@@ -7,14 +7,17 @@ import hashlib
 import re
 import urllib.error
 import urllib.request
+from datetime import datetime
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from info_store import InfoStore as LedgerStore
 from job_utils import (
+    StageRecord,
     detect_service_failure,
     ensure_parent_dir,
     filter_stage_records,
+    is_record_within_lookback,
     load_code_filter,
     parse_state_list,
     print_stage_report,
@@ -40,6 +43,7 @@ class DownloadStageConfig:
     timeout_sec: int
     service_failure_limit: int
     max_records: int
+    lookback_days: int
     dry_run: bool
     code_filter: set[str] = field(default_factory=set)
     allowed_states: set[str] = field(default_factory=lambda: set(DEFAULT_ALLOWED_STATES))
@@ -89,6 +93,77 @@ def sha1_bytes(content: bytes) -> str:
     return digest.hexdigest().upper()
 
 
+def _download_attempts(record: dict) -> int:
+    attempts = record.get("attempt_counts", {})
+    if not isinstance(attempts, dict):
+        return 0
+    value = attempts.get("download", 0)
+    if isinstance(value, int):
+        return value
+    try:
+        return int(value)
+    except Exception:
+        return 0
+
+
+def _missing_lfs_path(record: dict) -> bool:
+    value = record.get("lfs_path")
+    if isinstance(value, str):
+        return not value.strip()
+    return True
+
+
+def _is_stage_retry_eligible(record: dict, allowed_states: set[str]) -> bool:
+    state = str(record.get("state") or "").strip()
+    if allowed_states and state not in allowed_states:
+        return False
+    return _download_attempts(record) < 2
+
+
+def _record_gr_datetime(record: dict) -> datetime | None:
+    text = str(record.get("gr_date") or "").strip()
+    if len(text) >= 10 and text[4] == "-" and text[7] == "-":
+        candidate = text[:10]
+        try:
+            return datetime.strptime(candidate, "%Y-%m-%d")
+        except ValueError:
+            return None
+    return None
+
+
+def _download_candidate_sort_key(item: StageRecord) -> tuple[int, int, str]:
+    parsed = _record_gr_datetime(item.record)
+    if parsed is not None:
+        return (0, -int(parsed.strftime("%Y%m%d")), item.unique_code)
+    return (1, 0, item.unique_code)
+
+
+def _select_download_candidates(store: LedgerStore, config: DownloadStageConfig) -> list[StageRecord]:
+    stage_candidates = filter_stage_records(
+        store,
+        allowed_states=config.allowed_states,
+        stage="download",
+        code_filter=config.code_filter,
+        max_attempts=2,
+        lookback_days=config.lookback_days,
+    )
+    by_code: dict[str, StageRecord] = {item.unique_code: item for item in stage_candidates}
+
+    for record in store.iter_records():
+        unique_code = str(record.get("unique_code") or "").strip()
+        if not unique_code or unique_code in by_code:
+            continue
+        if config.code_filter and unique_code not in config.code_filter:
+            continue
+        if not is_record_within_lookback(record, config.lookback_days):
+            continue
+        if not _missing_lfs_path(record):
+            continue
+        by_code[unique_code] = StageRecord(unique_code=unique_code, record=record)
+
+    return sorted(by_code.values(), key=_download_candidate_sort_key)
+
+
 def _download_content(url: str, timeout_sec: int) -> tuple[int | None, bytes | None, str]:
     request = urllib.request.Request(url, method="GET")
     try:
@@ -110,13 +185,7 @@ def run_download_stage(config: DownloadStageConfig) -> DownloadStageReport:
     store = LedgerStore(config.ledger_dir)
     report = DownloadStageReport()
 
-    candidates = filter_stage_records(
-        store,
-        allowed_states=config.allowed_states,
-        stage="download",
-        code_filter=config.code_filter,
-        max_attempts=2,
-    )
+    candidates = _select_download_candidates(store, config)
     report.selected = len(candidates)
 
     limit = config.max_records if config.max_records > 0 else len(candidates)
@@ -125,6 +194,7 @@ def run_download_stage(config: DownloadStageConfig) -> DownloadStageReport:
     for item in candidates[:limit]:
         record = item.record
         unique_code = item.unique_code
+        use_stage_transition = _is_stage_retry_eligible(record, config.allowed_states)
         source_url = str(record.get("source_url") or "").strip()
         if not source_url:
             report.skipped += 1
@@ -144,16 +214,32 @@ def run_download_stage(config: DownloadStageConfig) -> DownloadStageReport:
             if pdf_path.exists() and pdf_path.is_file():
                 file_size = pdf_path.stat().st_size
                 file_hash = sha1_file(pdf_path)
-                store.apply_stage_result(
-                    unique_code=unique_code,
-                    stage="download",
-                    success=True,
-                    metadata={
-                        "path": to_ledger_relative_path(pdf_path),
-                        "hash": file_hash,
-                        "size": file_size,
-                    },
-                )
+                metadata = {
+                    "path": to_ledger_relative_path(pdf_path),
+                    "hash": file_hash,
+                    "size": file_size,
+                }
+                if use_stage_transition:
+                    store.apply_stage_result(
+                        unique_code=unique_code,
+                        stage="download",
+                        success=True,
+                        metadata=metadata,
+                    )
+                else:
+                    store.update(
+                        {
+                            "record_key": unique_code,
+                            "download": {
+                                "status": "success",
+                                "error": "",
+                                "path": metadata["path"],
+                                "hash": metadata["hash"],
+                                "size": metadata["size"],
+                            },
+                            "lfs_path": metadata["path"],
+                        }
+                    )
                 report.success += 1
                 consecutive_service_failures = 0
                 continue
@@ -163,25 +249,53 @@ def run_download_stage(config: DownloadStageConfig) -> DownloadStageReport:
             if status_code == 200 and content is not None:
                 ensure_parent_dir(pdf_path)
                 pdf_path.write_bytes(content)
-                store.apply_stage_result(
-                    unique_code=unique_code,
-                    stage="download",
-                    success=True,
-                    metadata={
-                        "path": to_ledger_relative_path(pdf_path),
-                        "hash": sha1_bytes(content),
-                        "size": len(content),
-                    },
-                )
+                metadata = {
+                    "path": to_ledger_relative_path(pdf_path),
+                    "hash": sha1_bytes(content),
+                    "size": len(content),
+                }
+                if use_stage_transition:
+                    store.apply_stage_result(
+                        unique_code=unique_code,
+                        stage="download",
+                        success=True,
+                        metadata=metadata,
+                    )
+                else:
+                    store.update(
+                        {
+                            "record_key": unique_code,
+                            "download": {
+                                "status": "success",
+                                "error": "",
+                                "path": metadata["path"],
+                                "hash": metadata["hash"],
+                                "size": metadata["size"],
+                            },
+                            "lfs_path": metadata["path"],
+                        }
+                    )
                 report.success += 1
                 consecutive_service_failures = 0
             else:
-                store.apply_stage_result(
-                    unique_code=unique_code,
-                    stage="download",
-                    success=False,
-                    error=error_text or f"download_failed_{status_code}",
-                )
+                failure_text = error_text or f"download_failed_{status_code}"
+                if use_stage_transition:
+                    store.apply_stage_result(
+                        unique_code=unique_code,
+                        stage="download",
+                        success=False,
+                        error=failure_text,
+                    )
+                else:
+                    store.update(
+                        {
+                            "record_key": unique_code,
+                            "download": {
+                                "status": "failed",
+                                "error": failure_text,
+                            },
+                        }
+                    )
                 report.failed += 1
                 if is_service_failure:
                     consecutive_service_failures += 1
@@ -196,12 +310,24 @@ def run_download_stage(config: DownloadStageConfig) -> DownloadStageReport:
             consecutive_service_failures += 1
             if not config.dry_run:
                 try:
-                    store.apply_stage_result(
-                        unique_code=unique_code,
-                        stage="download",
-                        success=False,
-                        error=f"download_exception:{exc}",
-                    )
+                    failure_text = f"download_exception:{exc}"
+                    if use_stage_transition:
+                        store.apply_stage_result(
+                            unique_code=unique_code,
+                            stage="download",
+                            success=False,
+                            error=failure_text,
+                        )
+                    else:
+                        store.update(
+                            {
+                                "record_key": unique_code,
+                                "download": {
+                                    "status": "failed",
+                                    "error": failure_text,
+                                },
+                            }
+                        )
                 except Exception:
                     pass
 
@@ -233,6 +359,12 @@ def configure_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser
     parser.add_argument("--code", action="append", default=[], help="Explicit unique_code values to process")
     parser.add_argument("--allowed-state", action="append", default=[], help="Override allowed states")
     parser.add_argument("--max-records", type=int, default=0, help="Optional cap on records processed")
+    parser.add_argument(
+        "--lookback-days",
+        type=int,
+        default=0,
+        help="Process only records dated within the last N days (0 means no date filter)",
+    )
     parser.add_argument("--timeout-sec", type=int, default=30, help="HTTP timeout seconds")
     parser.add_argument(
         "--service-failure-limit",
@@ -254,6 +386,7 @@ def run_from_args(args: argparse.Namespace) -> int:
         timeout_sec=max(1, args.timeout_sec),
         service_failure_limit=max(1, args.service_failure_limit),
         max_records=max(0, args.max_records),
+        lookback_days=max(0, args.lookback_days),
         dry_run=args.dry_run,
         code_filter=code_filter,
         allowed_states=allowed_states,

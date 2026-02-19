@@ -51,6 +51,8 @@ Environment variables used by stages:
 - HF sync token: `HF_TOKEN`
 - HF sync defaults: `import/import_config.yaml` -> `hf` section (`dataset_repo_url`, `dataset_repo_id`, `dataset_repo_path`, `upload_large_folder_mode`, `upload_large_folder_threshold`)
 
+Most jobs support `--lookback-days N` to process only records within the last `N` days (relative to current UTC date). Use `0` to disable this filter.
+
 ## Hugging Face sync modes
 
 `sync-hf` is API-based (no local git clone required) and supports:
