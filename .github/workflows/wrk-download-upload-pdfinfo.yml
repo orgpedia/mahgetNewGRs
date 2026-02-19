@@ -1,0 +1,60 @@
+name: wrk-download-upload-pdfinfo
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: wrk-download-upload-pdfinfo-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  run_workflow:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.5.16"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Ensure HF local path exists
+        run: mkdir -p LFS/mahGRs/pdfs
+
+      - name: Validate required secrets
+        env:
+          HF_TOKEN: ${{ secrets.HF_WRITE_TOKEN }}
+        run: |
+          if [ -z "${HF_TOKEN}" ]; then
+            echo "HF_TOKEN secret is required."
+            exit 1
+          fi
+
+      - name: Run workflow target
+        env:
+          HF_TOKEN: ${{ secrets.HF_WRITE_TOKEN }}
+          HF_REPO_PATH: LFS/mahGRs
+        run: uv run make wrk-download-upload-pdfinfo
+
+      - name: Commit and push changes
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "ci: run wrk-download-upload-pdfinfo"
