@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import signal
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -19,10 +18,6 @@ from local_env import load_local_env
 
 
 DEFAULT_MAX_RUNTIME_MINUTES = 345
-
-
-class WorkflowTimeoutError(RuntimeError):
-    pass
 
 
 @dataclass(frozen=True)
@@ -78,38 +73,31 @@ def _runtime_seconds(max_runtime_minutes: int) -> int:
     return minutes * 60
 
 
-def _install_runtime_alarm(max_runtime_seconds: int):
-    if max_runtime_seconds <= 0 or not hasattr(signal, "SIGALRM"):
-        return None
-
-    previous_handler = signal.getsignal(signal.SIGALRM)
-
-    def _alarm_handler(_signum, _frame):
-        raise WorkflowTimeoutError(
-            "reached max runtime limit "
-            f"({max_runtime_seconds} seconds)"
-        )
-
-    signal.signal(signal.SIGALRM, _alarm_handler)
-    signal.alarm(max_runtime_seconds)
-    return previous_handler
+def _runtime_reached(deadline_monotonic: float | None) -> bool:
+    return deadline_monotonic is not None and time.monotonic() >= deadline_monotonic
 
 
-def _clear_runtime_alarm(previous_handler) -> None:
-    if previous_handler is None or not hasattr(signal, "SIGALRM"):
-        return
-    signal.alarm(0)
-    signal.signal(signal.SIGALRM, previous_handler)
-
-
-def _check_deadline(deadline_monotonic: float | None, max_runtime_seconds: int) -> None:
-    if deadline_monotonic is None:
-        return
-    if time.monotonic() >= deadline_monotonic:
-        raise WorkflowTimeoutError(
-            "reached max runtime limit "
-            f"({max_runtime_seconds} seconds)"
-        )
+def _print_batch_summary(
+    *,
+    batch_index: int,
+    elapsed_seconds: float,
+    download_report: download_pdf_job.DownloadStageReport,
+    success_files: int,
+    uploaded_files: int,
+    pdf_processed: int,
+    pdf_updated: int,
+    deleted_files: int,
+) -> None:
+    print(
+        "Batch summary "
+        f"#{batch_index}: "
+        f"download(sel={download_report.selected}, proc={download_report.processed}, "
+        f"ok={download_report.success}, fail={download_report.failed}, skip={download_report.skipped}) "
+        f"files={success_files} upload={uploaded_files} "
+        f"pdfinfo(proc={pdf_processed}, upd={pdf_updated}) "
+        f"cleanup(del={deleted_files}) "
+        f"elapsed={elapsed_seconds:.1f}s"
+    )
 
 
 def _dedupe_keep_order(values: list[str]) -> list[str]:
@@ -310,7 +298,6 @@ def run_workflow(config: DownloadUploadPdfInfoWorkflowConfig) -> tuple[int, Down
     print(f"Batch size: {config.batch_size}")
     print(f"Max records: {config.max_records}")
     print(f"Max runtime minutes: {config.max_runtime_minutes}")
-    _check_deadline(deadline_monotonic, max_runtime_seconds)
     _verbose_log(config, f"ledger_dir={config.ledger_dir}")
     _verbose_log(config, f"lfs_root={config.lfs_root}")
     _verbose_log(config, f"hf_repo_path={config.hf_repo_path}")
@@ -325,7 +312,6 @@ def run_workflow(config: DownloadUploadPdfInfoWorkflowConfig) -> tuple[int, Down
     batch_index = 0
 
     while True:
-        _check_deadline(deadline_monotonic, max_runtime_seconds)
         if config.max_records > 0 and report.total_download_processed >= config.max_records:
             report.stop_reason = "max_records_reached"
             print(f"Reached max-records limit ({config.max_records}). Stopping workflow.")
@@ -341,6 +327,11 @@ def run_workflow(config: DownloadUploadPdfInfoWorkflowConfig) -> tuple[int, Down
 
         batch_index += 1
         print(f"Batch #{batch_index}")
+        batch_started_at = time.monotonic()
+        uploaded_files = 0
+        pdf_processed = 0
+        pdf_updated = 0
+        deleted_files = 0
 
         download_config = download_pdf_job.DownloadStageConfig(
             ledger_dir=config.ledger_dir,
@@ -363,30 +354,40 @@ def run_workflow(config: DownloadUploadPdfInfoWorkflowConfig) -> tuple[int, Down
         report.total_download_skipped += download_report.skipped
         report.total_download_service_failures += download_report.service_failures
 
-        print_stage_report(
-            "Download stage",
-            selected=download_report.selected,
-            processed=download_report.processed,
-            success=download_report.success,
-            failed=download_report.failed,
-            skipped=download_report.skipped,
-            service_failures=download_report.service_failures,
-            stopped_early=download_report.stopped_early,
-        )
+        if config.verbose:
+            print_stage_report(
+                "Download stage",
+                selected=download_report.selected,
+                processed=download_report.processed,
+                success=download_report.success,
+                failed=download_report.failed,
+                skipped=download_report.skipped,
+                service_failures=download_report.service_failures,
+                stopped_early=download_report.stopped_early,
+            )
         _verbose_preview_codes(config, "download processed codes", download_report.processed_codes)
 
         if download_report.selected == 0:
+            _print_batch_summary(
+                batch_index=batch_index,
+                elapsed_seconds=time.monotonic() - batch_started_at,
+                download_report=download_report,
+                success_files=0,
+                uploaded_files=uploaded_files,
+                pdf_processed=pdf_processed,
+                pdf_updated=pdf_updated,
+                deleted_files=deleted_files,
+            )
             report.stop_reason = "no_eligible_records"
             print("No eligible records remain. Stopping workflow.")
             return 0, report
 
-        _check_deadline(deadline_monotonic, max_runtime_seconds)
         success_codes, file_paths = _collect_batch_files(
             ledger_dir=config.ledger_dir,
             processed_codes=download_report.processed_codes,
         )
         report.total_batch_success_with_files += len(success_codes)
-        print(f"Batch success records with local PDFs: {len(success_codes)}")
+        _verbose_log(config, f"batch success records with local PDFs: {len(success_codes)}")
         _verbose_preview_codes(config, "batch success codes", success_codes)
         if config.verbose and success_codes:
             show_count = min(len(success_codes), 25)
@@ -395,6 +396,16 @@ def run_workflow(config: DownloadUploadPdfInfoWorkflowConfig) -> tuple[int, Down
                 print(f"[verbose]   {code} -> {path}")
 
         if not success_codes:
+            _print_batch_summary(
+                batch_index=batch_index,
+                elapsed_seconds=time.monotonic() - batch_started_at,
+                download_report=download_report,
+                success_files=0,
+                uploaded_files=uploaded_files,
+                pdf_processed=pdf_processed,
+                pdf_updated=pdf_updated,
+                deleted_files=deleted_files,
+            )
             print("No successful downloaded files in this batch. Skipping upload and pdf-info for this batch.")
             if config.dry_run:
                 report.stop_reason = "dry_run_single_batch"
@@ -404,9 +415,15 @@ def run_workflow(config: DownloadUploadPdfInfoWorkflowConfig) -> tuple[int, Down
                 report.stop_reason = "no_progress"
                 print("No actionable records were processed in this batch. Stopping to avoid an infinite loop.")
                 return 0, report
+            if _runtime_reached(deadline_monotonic):
+                report.stop_reason = "max_runtime_reached"
+                print(
+                    "Reached max runtime limit after completing current batch "
+                    f"({max_runtime_seconds} seconds). Stopping workflow."
+                )
+                return 0, report
             continue
 
-        _check_deadline(deadline_monotonic, max_runtime_seconds)
         try:
             uploaded_files = _run_upload_batch(config, file_paths)
         except sync_hf_job.SyncHFError as exc:
@@ -418,7 +435,6 @@ def run_workflow(config: DownloadUploadPdfInfoWorkflowConfig) -> tuple[int, Down
         _verbose_log(config, f"running pdf-info for {len(success_codes)} records")
         if config.verbose and not config.pdf_verbose:
             print("[skip filter] non-batch records are filtered out (enable --pdf-verbose for full per-record logs)")
-        _check_deadline(deadline_monotonic, max_runtime_seconds)
         try:
             pdf_report = pdf_info_job.run_pdf_info_stage(
                 pdf_info_job.PdfInfoConfig(
@@ -440,16 +456,37 @@ def run_workflow(config: DownloadUploadPdfInfoWorkflowConfig) -> tuple[int, Down
         report.last_pdf_info_report = pdf_report
         report.total_pdf_info_processed += pdf_report.processed_records
         report.total_pdf_info_updated += pdf_report.updated_records
-        pdf_info_job.print_pdf_info_stage_report(pdf_report, dry_run=config.dry_run)
+        pdf_processed = pdf_report.processed_records
+        pdf_updated = pdf_report.updated_records
+        if config.verbose:
+            pdf_info_job.print_pdf_info_stage_report(pdf_report, dry_run=config.dry_run)
 
         deleted_files, skipped_cleanup = _cleanup_batch_files(config, file_paths)
         report.total_deleted_files += deleted_files
         report.total_cleanup_skipped += skipped_cleanup
-        print(f"Cleanup stage: removed={deleted_files} skipped={skipped_cleanup}")
+        _print_batch_summary(
+            batch_index=batch_index,
+            elapsed_seconds=time.monotonic() - batch_started_at,
+            download_report=download_report,
+            success_files=len(success_codes),
+            uploaded_files=uploaded_files,
+            pdf_processed=pdf_processed,
+            pdf_updated=pdf_updated,
+            deleted_files=deleted_files,
+        )
+        _verbose_log(config, f"cleanup skipped entries: {skipped_cleanup}")
 
         if config.dry_run:
             report.stop_reason = "dry_run_single_batch"
             print("Dry-run mode keeps candidate state unchanged; stopping after one batch.")
+            return 0, report
+
+        if _runtime_reached(deadline_monotonic):
+            report.stop_reason = "max_runtime_reached"
+            print(
+                "Reached max runtime limit after completing current batch "
+                f"({max_runtime_seconds} seconds). Stopping workflow."
+            )
             return 0, report
 
 
@@ -560,14 +597,7 @@ def run_from_args(args: argparse.Namespace) -> int:
         pdf_verbose=args.pdf_verbose,
         verbose=args.verbose,
     )
-    previous_alarm = _install_runtime_alarm(_runtime_seconds(config.max_runtime_minutes))
-    try:
-        exit_code, report = run_workflow(config)
-    except WorkflowTimeoutError as exc:
-        print(f"workflow timeout: {exc}")
-        return 124
-    finally:
-        _clear_runtime_alarm(previous_alarm)
+    exit_code, report = run_workflow(config)
     if report is not None:
         print("Workflow summary:")
         print(f"  batches_run: {report.batches_run}")

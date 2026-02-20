@@ -84,7 +84,7 @@ job-download-pdf:
 	$(CLI) update-readme-status --ledger-dir $(LEDGER_DIR) --readme-path README.md
 
 wrk-download-upload-pdfinfo:
-	$(CLI) wrk-download-upload-pdfinfo --ledger-dir $(LEDGER_DIR) --hf-repo-path "$(HF_REPO_PATH)" --verbose
+	$(CLI) wrk-download-upload-pdfinfo --ledger-dir $(LEDGER_DIR) --hf-repo-path "$(HF_REPO_PATH)" --batch-size 5 --max-runtime-minutes 10
 	$(CLI) update-readme-status --ledger-dir $(LEDGER_DIR) --readme-path README.md
 
 sync-hf:
