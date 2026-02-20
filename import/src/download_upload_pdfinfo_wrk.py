@@ -17,7 +17,7 @@ from job_utils import load_code_filter, parse_state_list, print_stage_report
 from local_env import load_local_env
 
 
-DEFAULT_MAX_RUNTIME_MINUTES = 345
+DEFAULT_MAX_RUNTIME_MINUTES = 340
 
 
 @dataclass(frozen=True)
@@ -501,7 +501,7 @@ def configure_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser
         "--max-runtime-minutes",
         type=int,
         default=DEFAULT_MAX_RUNTIME_MINUTES,
-        help="Stop workflow once runtime reaches N minutes (default: 345 = 5h45m; 0 disables)",
+        help="Stop workflow once runtime reaches N minutes (default: 340 = 5h40m; 0 disables)",
     )
     parser.add_argument(
         "--lookback-days",
