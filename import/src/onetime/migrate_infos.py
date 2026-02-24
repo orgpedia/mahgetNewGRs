@@ -365,7 +365,7 @@ def _build_pdfinfo_row(row: dict[str, Any], record_key: str, now_text: str) -> d
         out["page_count"] = None
         out["pages_with_images"] = None
         out["has_any_page_image"] = None
-        out["font_count"] = None
+        out["total_font_count"] = None
         out["fonts"] = None
         out["unresolved_word_count"] = None
         out["language"] = None
@@ -375,7 +375,10 @@ def _build_pdfinfo_row(row: dict[str, Any], record_key: str, now_text: str) -> d
     out["page_count"] = _int_or_none(pdf_src.get("page_count"))
     out["pages_with_images"] = _int_or_none(pdf_src.get("pages_with_images"))
     out["has_any_page_image"] = _bool_or_none(pdf_src.get("has_any_page_image"))
-    out["font_count"] = _int_or_none(pdf_src.get("font_count"))
+    total_font_count = pdf_src.get("total_font_count")
+    if total_font_count is None:
+        total_font_count = pdf_src.get("font_count")
+    out["total_font_count"] = _int_or_none(total_font_count)
     out["fonts"] = _normalize_pdf_fonts(pdf_src.get("fonts"))
     out["unresolved_word_count"] = _int_or_none(pdf_src.get("unresolved_word_count"))
     out["language"] = pdf_src.get("language") if isinstance(pdf_src.get("language"), dict) else None

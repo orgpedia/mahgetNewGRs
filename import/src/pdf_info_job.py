@@ -370,7 +370,7 @@ def extract_pdf_info(pdf_path: Path, fitz: Any) -> dict[str, Any]:
         "page_count": page_count,
         "pages_with_images": pages_with_images,
         "has_any_page_image": pages_with_images > 0,
-        "font_count": len(sorted_fonts),
+        "total_font_count": len(fonts),
         "fonts": sorted_fonts,
         "unresolved_word_count": unresolved_word_count,
         "language": {
@@ -389,7 +389,7 @@ def _build_missing_info() -> dict[str, Any]:
         "page_count": None,
         "pages_with_images": None,
         "has_any_page_image": None,
-        "font_count": None,
+        "total_font_count": None,
         "fonts": None,
         "unresolved_word_count": None,
         "language": None,
@@ -404,7 +404,7 @@ def _build_failed_info(error: str) -> dict[str, Any]:
         "page_count": None,
         "pages_with_images": 0,
         "has_any_page_image": False,
-        "font_count": 0,
+        "total_font_count": 0,
         "fonts": {},
         "unresolved_word_count": 0,
         "language": {
@@ -547,7 +547,7 @@ def run_selected(
                     (
                         f"[extracted] {label} pages={next_pdf_info.get('page_count')} "
                         f"images={next_pdf_info.get('pages_with_images')} "
-                        f"fonts={next_pdf_info.get('font_count')} "
+                        f"fonts={next_pdf_info.get('total_font_count')} "
                         f"words={language.get('total_words') if isinstance(language, dict) else ''} "
                         f"lang={inferred or 'unknown'}"
                     ),

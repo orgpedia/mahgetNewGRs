@@ -247,7 +247,7 @@ def default_record_template(unique_code: str) -> dict[str, Any]:
             "page_count": None,
             "pages_with_images": 0,
             "has_any_page_image": False,
-            "font_count": 0,
+            "total_font_count": 0,
             "fonts": {},
             "unresolved_word_count": 0,
             "language": {

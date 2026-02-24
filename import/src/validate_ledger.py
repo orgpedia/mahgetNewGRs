@@ -90,7 +90,7 @@ PDF_EXTRACTED_FIELDS = {
     "page_count",
     "pages_with_images",
     "has_any_page_image",
-    "font_count",
+    "total_font_count",
     "fonts",
     "unresolved_word_count",
     "language",
