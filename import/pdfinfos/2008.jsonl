@@ -1902,7 +1902,7 @@
 {"created_at_utc": "2026-02-06T08:41:42Z", "record_key": "20081020125224001", "status": "not_attempted"}
 {"created_at_utc": "2026-02-06T08:41:42Z", "record_key": "20081020125513001", "status": "not_attempted"}
 {"created_at_utc": "2026-02-06T08:41:42Z", "record_key": "20081021121041001", "status": "not_attempted"}
-{"created_at_utc": "2026-02-06T08:41:42Z", "error": "", "file_size": 46080, "font_count": 3, "fonts": {"10": {"name": "LRMSER+DVB-TTSurekh", "script_word_counts": {"Latin": 1030, "Other": 3}, "type": "TrueType", "word_count": 1033}, "12": {"name": "VRBBWM+TimesNewRoman", "script_word_counts": {"Latin": 2}, "type": "TrueType", "word_count": 2}, "8": {"name": "FPHEDZ+DVB-TTSurekh", "script_word_counts": {}, "type": "TrueType"}}, "has_any_page_image": false, "language": {"inferred": "en", "script_word_counts": {"Latin": 1032, "Other": 3}, "total_words": 1035}, "page_count": 2, "pages_with_images": 0, "record_key": "20081021130110001", "status": "success", "unresolved_word_count": 0}
+{"created_at_utc": "2026-02-06T08:41:42Z", "error": "", "file_size": 46080, "fonts": {"10": {"name": "LRMSER+DVB-TTSurekh", "script_word_counts": {"Latin": 1030, "Other": 3}, "type": "TrueType", "word_count": 1033}, "12": {"name": "VRBBWM+TimesNewRoman", "script_word_counts": {"Latin": 2}, "type": "TrueType", "word_count": 2}}, "has_any_page_image": false, "language": {"inferred": "en", "script_word_counts": {"Latin": 1032, "Other": 3}, "total_words": 1035}, "page_count": 2, "pages_with_images": 0, "record_key": "20081021130110001", "status": "success", "total_font_count": 3, "unresolved_word_count": 0}
 {"created_at_utc": "2026-02-06T08:41:42Z", "record_key": "20081021155155001", "status": "not_attempted"}
 {"created_at_utc": "2026-02-06T08:41:42Z", "record_key": "20081021163247001", "status": "not_attempted"}
 {"created_at_utc": "2026-02-06T08:41:42Z", "record_key": "20081021165539001", "status": "not_attempted"}
@@ -2311,9 +2311,9 @@
 {"created_at_utc": "2026-02-06T08:41:42Z", "record_key": "20090929162928001", "status": "not_attempted"}
 {"created_at_utc": "2026-02-06T08:41:42Z", "record_key": "20090929172354001", "status": "not_attempted"}
 {"created_at_utc": "2026-02-06T08:41:42Z", "record_key": "20091109121934001", "status": "not_attempted"}
-{"created_at_utc": "2026-02-06T08:41:42Z", "error": "", "file_size": 31911, "font_count": 0, "fonts": {}, "has_any_page_image": true, "language": {"inferred": "unknown", "script_word_counts": {}, "total_words": 0}, "page_count": 1, "pages_with_images": 1, "record_key": "20091127140242001", "status": "success", "unresolved_word_count": 0}
+{"created_at_utc": "2026-02-06T08:41:42Z", "error": "", "file_size": 31911, "fonts": {}, "has_any_page_image": true, "language": {"inferred": "unknown", "script_word_counts": {}, "total_words": 0}, "page_count": 1, "pages_with_images": 1, "record_key": "20091127140242001", "status": "success", "total_font_count": 0, "unresolved_word_count": 0}
 {"created_at_utc": "2026-02-06T08:41:42Z", "record_key": "20091211125735001", "status": "not_attempted"}
-{"created_at_utc": "2026-02-06T08:41:42Z", "error": "", "file_size": 53950, "font_count": 0, "fonts": {}, "has_any_page_image": true, "language": {"inferred": "unknown", "script_word_counts": {}, "total_words": 0}, "page_count": 2, "pages_with_images": 2, "record_key": "20100208200328001", "status": "success", "unresolved_word_count": 0}
+{"created_at_utc": "2026-02-06T08:41:42Z", "error": "", "file_size": 53950, "fonts": {}, "has_any_page_image": true, "language": {"inferred": "unknown", "script_word_counts": {}, "total_words": 0}, "page_count": 2, "pages_with_images": 2, "record_key": "20100208200328001", "status": "success", "total_font_count": 0, "unresolved_word_count": 0}
 {"created_at_utc": "2026-02-06T08:41:42Z", "record_key": "20100226171143001", "status": "not_attempted"}
 {"created_at_utc": "2026-02-06T08:41:42Z", "record_key": "20100308130327001", "status": "not_attempted"}
 {"created_at_utc": "2026-02-06T08:41:42Z", "record_key": "20100312195331001", "status": "not_attempted"}

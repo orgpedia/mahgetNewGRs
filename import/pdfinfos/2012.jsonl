@@ -1,4 +1,4 @@
-{"created_at_utc": "2026-02-06T08:41:42Z", "error": "", "file_size": 41586, "font_count": 0, "fonts": {}, "has_any_page_image": true, "language": {"inferred": "unknown", "script_word_counts": {}, "total_words": 0}, "page_count": 2, "pages_with_images": 2, "record_key": "0212529125640540001", "status": "success", "unresolved_word_count": 0}
+{"created_at_utc": "2026-02-06T08:41:42Z", "error": "", "file_size": 41586, "fonts": {}, "has_any_page_image": true, "language": {"inferred": "unknown", "script_word_counts": {}, "total_words": 0}, "page_count": 2, "pages_with_images": 2, "record_key": "0212529125640540001", "status": "success", "total_font_count": 0, "unresolved_word_count": 0}
 {"created_at_utc": "2026-02-06T08:41:42Z", "record_key": "20110927164409001", "status": "not_attempted"}
 {"created_at_utc": "2026-02-06T08:41:42Z", "record_key": "201110180653371037001", "status": "not_attempted"}
 {"created_at_utc": "2026-02-06T08:41:42Z", "record_key": "2011102430229001", "status": "not_attempted"}
@@ -155,7 +155,7 @@
 {"created_at_utc": "2026-02-06T08:41:42Z", "record_key": "20120127075358158001", "status": "not_attempted"}
 {"created_at_utc": "2026-02-06T08:41:42Z", "record_key": "2012012709150414001", "status": "not_attempted"}
 {"created_at_utc": "2026-02-06T08:41:42Z", "record_key": "20120127116536001", "status": "not_attempted"}
-{"created_at_utc": "2026-02-06T08:41:42Z", "error": "", "file_size": 128420, "font_count": 0, "fonts": {}, "has_any_page_image": true, "language": {"inferred": "unknown", "script_word_counts": {}, "total_words": 0}, "page_count": 3, "pages_with_images": 3, "record_key": "20120130006120414001", "status": "success", "unresolved_word_count": 0}
+{"created_at_utc": "2026-02-06T08:41:42Z", "error": "", "file_size": 128420, "fonts": {}, "has_any_page_image": true, "language": {"inferred": "unknown", "script_word_counts": {}, "total_words": 0}, "page_count": 3, "pages_with_images": 3, "record_key": "20120130006120414001", "status": "success", "total_font_count": 0, "unresolved_word_count": 0}
 {"created_at_utc": "2026-02-06T08:41:42Z", "record_key": "20120130045520120001", "status": "not_attempted"}
 {"created_at_utc": "2026-02-06T08:41:42Z", "record_key": "2012013007273513513500", "status": "not_attempted"}
 {"created_at_utc": "2026-02-06T08:41:42Z", "record_key": "20120130074224124001", "status": "not_attempted"}
