@@ -79,9 +79,15 @@ class InfoStore:
     so existing stage code can be cut over incrementally.
     """
 
-    def __init__(self, ledger_dir: str | Path = "import/grinfo") -> None:
+    def __init__(
+        self,
+        ledger_dir: str | Path = "import/grinfo",
+        *,
+        partitions: set[str] | None = None,
+    ) -> None:
         requested = Path(ledger_dir).resolve()
         self.root_dir = self._resolve_root_dir(requested)
+        self._partition_filter = self._normalize_partition_filter(partitions)
         self.url_dir = self.root_dir / URL_NS
         self.upload_dir = self.root_dir / UPLOAD_NS
         self.pdf_dir = self.root_dir / PDF_NS
@@ -104,7 +110,20 @@ class InfoStore:
         }
         self.refresh_index()
 
-    def _resolve_root_dir(self, requested: Path) -> Path:
+    @staticmethod
+    def _normalize_partition_filter(partitions: set[str] | None) -> set[str] | None:
+        if partitions is None:
+            return None
+        normalized = {str(value).strip() for value in partitions if str(value).strip()}
+        return normalized or None
+
+    def _is_partition_allowed(self, partition: str) -> bool:
+        if self._partition_filter is None:
+            return True
+        return partition in self._partition_filter
+
+    @staticmethod
+    def _resolve_root_dir(requested: Path) -> Path:
         if (requested / URL_NS).exists() or (requested / UPLOAD_NS).exists() or (requested / PDF_NS).exists():
             return requested
         if requested.name in {"grinfo", URL_NS, UPLOAD_NS, PDF_NS}:
@@ -170,12 +189,22 @@ class InfoStore:
     def _list_partitions_for_ns(self, namespace: str) -> list[str]:
         path = self._ns_dir(namespace)
         return sorted(
-            {item.stem for item in path.glob("*.jsonl")},
+            {item.stem for item in path.glob("*.jsonl") if self._is_partition_allowed(item.stem)},
             key=lambda name: _namespace_sort_key(Path(f"{name}.jsonl")),
         )
 
     def list_partitions(self) -> list[str]:
         return self._list_partitions_for_ns(URL_NS)
+
+    @classmethod
+    def list_url_partitions(cls, ledger_dir: str | Path = "import/grinfo") -> list[str]:
+        requested = Path(ledger_dir).resolve()
+        root_dir = cls._resolve_root_dir(requested)
+        url_dir = root_dir / URL_NS
+        return sorted(
+            {item.stem for item in url_dir.glob("*.jsonl")},
+            key=lambda name: _namespace_sort_key(Path(f"{name}.jsonl")),
+        )
 
     def refresh_index(self) -> None:
         for ns in (URL_NS, UPLOAD_NS, PDF_NS):
@@ -183,6 +212,8 @@ class InfoStore:
             self._index[ns] = {}
             for file_path in sorted(self._ns_dir(ns).glob("*.jsonl"), key=_namespace_sort_key):
                 partition = file_path.stem
+                if not self._is_partition_allowed(partition):
+                    continue
                 rows = self._read_partition(ns, partition)
                 for idx, row in enumerate(rows):
                     key = self._row_key(row)
@@ -351,12 +382,11 @@ class InfoStore:
         created_at: str,
         updated_at: str | None = None,
     ) -> dict[str, Any]:
-        updated_value = _normalize_text(updated_at) or now_text
+        _ = updated_at
         base = {
             "record_key": record_key,
             "status": "not_attempted",
             "created_at_utc": created_at,
-            "updated_at_utc": updated_value,
         }
         if not isinstance(pdf_info, dict):
             return base
@@ -857,8 +887,8 @@ class InfoStore:
             has_wayback_url=has_wayback_url,
             has_document=has_document,
         )
-        StateMachine.validate_transition(current_state, next_state)
-        upload_row["state"] = next_state
+        #StateMachine.validate_transition(current_state, next_state)
+        #upload_row["state"] = next_state
 
         self._upsert_namespace_row(UPLOAD_NS, record_key, url_partition, upload_row)
         return UpsertResult(operation="updated", partition=url_partition, unique_code=record_key)

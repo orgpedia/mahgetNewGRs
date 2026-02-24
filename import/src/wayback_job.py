@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from job_utils import detect_service_failure, filter_stage_records, load_code_filter, parse_state_list, print_stage_report
+from job_utils import JobRunResult, detect_service_failure, filter_stage_records, load_code_filter, parse_state_list, print_stage_report
 from info_store import InfoStore as LedgerStore
 from ledger_engine import RetryLimitExceededError
 from local_env import load_local_env
@@ -24,27 +24,28 @@ SPN2_SAVE_URL = "https://web.archive.org/save"
 SPN2_STATUS_URL_FMT = "https://web.archive.org/save/status/{job_id}"
 
 
-class SPN2ClientError(Exception):
-    pass
+@dataclass(frozen=True)
+class WaybackJobConfig:
+    max_records: int
+    lookback_days: int
+    code_filter: set[str] = field(default_factory=set)
+    allowed_states: set[str] = field(default_factory=lambda: set(DEFAULT_ALLOWED_STATES))
+    verbose: bool = False
 
 
 @dataclass(frozen=True)
-class WaybackJobConfig:
-    ledger_dir: Path
-    max_records: int
-    lookback_days: int
+class WaybackStageConfig:
     dry_run: bool
     timeout_sec: int
     poll_interval_sec: float
     poll_timeout_sec: int
     service_failure_limit: int
-    code_filter: set[str] = field(default_factory=set)
-    allowed_states: set[str] = field(default_factory=lambda: set(DEFAULT_ALLOWED_STATES))
     access_key: str = ""
     secret_key: str = ""
     capture_all: bool = False
     skip_first_archive: bool = False
     delay_wb_availability: bool = True
+    verbose: bool = False
 
 
 @dataclass
@@ -57,6 +58,19 @@ class WaybackJobReport:
     service_failures: int = 0
     stopped_early: bool = False
     processed_codes: list[str] = field(default_factory=list)
+    success_codes: list[str] = field(default_factory=list)
+    failed_codes: list[str] = field(default_factory=list)
+    skipped_codes: list[str] = field(default_factory=list)
+
+
+def _verbose_job_log(config: WaybackJobConfig, message: str) -> None:
+    if config.verbose:
+        print(f"[wayback verbose] {message}")
+
+
+def _verbose_log(config: WaybackStageConfig, message: str) -> None:
+    if config.verbose:
+        print(f"[wayback verbose] {message}")
 
 
 def _auth_header(access_key: str, secret_key: str) -> str:
@@ -116,7 +130,7 @@ def _build_archive_urls(original_url: str, timestamp: str) -> tuple[str, str]:
     return archive_url, content_url
 
 
-def _submit_spn2(url: str, config: WaybackJobConfig) -> tuple[int | None, dict[str, Any] | None, str]:
+def _submit_spn2(url: str, config: WaybackStageConfig) -> tuple[int | None, dict[str, Any] | None, str]:
     payload = {
         "url": url,
         "capture_all": "1" if config.capture_all else "0",
@@ -136,7 +150,7 @@ def _submit_spn2(url: str, config: WaybackJobConfig) -> tuple[int | None, dict[s
     )
 
 
-def _poll_spn2(job_id: str, config: WaybackJobConfig) -> tuple[int | None, dict[str, Any] | None, str]:
+def _poll_spn2(job_id: str, config: WaybackStageConfig) -> tuple[int | None, dict[str, Any] | None, str]:
     deadline = time.time() + max(1, config.poll_timeout_sec)
     headers = {
         "Accept": "application/json",
@@ -167,28 +181,41 @@ def _poll_spn2(job_id: str, config: WaybackJobConfig) -> tuple[int | None, dict[
 
 def _run_single_wayback(
     record: dict[str, Any],
-    config: WaybackJobConfig,
+    config: WaybackStageConfig,
 ) -> tuple[bool, dict[str, Any], str, bool]:
+    unique_code = str(record.get("unique_code") or "").strip()
     source_url = str(record.get("source_url") or "").strip()
     if not source_url:
+        _verbose_log(config, f"[skip] code={unique_code or '-'} reason=missing_source_url")
         return False, {}, "missing_source_url", False
 
+    _verbose_log(config, f"[submit] code={unique_code or '-'} url={source_url}")
     submit_status, submit_body, submit_error = _submit_spn2(source_url, config)
     if submit_error:
+        _verbose_log(
+            config,
+            f"[submit failed] code={unique_code or '-'} status={submit_status if submit_status is not None else '-'} error={submit_error}",
+        )
         return False, {}, submit_error, detect_service_failure(submit_status)
 
     if not isinstance(submit_body, dict):
+        _verbose_log(config, f"[submit failed] code={unique_code or '-'} reason=invalid_response")
         return False, {}, "spn2_submit_invalid_response", False
 
     submit_state = str(submit_body.get("status", "")).lower()
     if submit_state == "error":
         error_message = str(submit_body.get("message") or submit_body.get("status_ext") or "spn2_submit_error")
+        _verbose_log(config, f"[submit failed] code={unique_code or '-'} error={error_message}")
         return False, {}, error_message, detect_service_failure(submit_status)
 
     timestamp = str(submit_body.get("timestamp") or "").strip()
     job_id = str(submit_body.get("job_id") or "").strip()
     if submit_state == "success" and timestamp:
         archive_url, content_url = _build_archive_urls(source_url, timestamp)
+        _verbose_log(
+            config,
+            f"[success] code={unique_code or '-'} timestamp={timestamp} status={submit_status if submit_status is not None else '-'}",
+        )
         return True, {
             "url": archive_url,
             "content_url": content_url,
@@ -200,24 +227,37 @@ def _run_single_wayback(
         }, "", False
 
     if not job_id:
+        _verbose_log(config, f"[submit failed] code={unique_code or '-'} reason=missing_job_id")
         return False, {}, "spn2_missing_job_id", False
 
+    _verbose_log(config, f"[poll] code={unique_code or '-'} job_id={job_id}")
     poll_status, poll_body, poll_error = _poll_spn2(job_id, config)
     if poll_error:
+        _verbose_log(
+            config,
+            f"[poll failed] code={unique_code or '-'} status={poll_status if poll_status is not None else '-'} error={poll_error}",
+        )
         return False, {}, poll_error, detect_service_failure(poll_status)
     if not isinstance(poll_body, dict):
+        _verbose_log(config, f"[poll failed] code={unique_code or '-'} reason=invalid_response")
         return False, {}, "spn2_poll_invalid_response", False
 
     poll_state = str(poll_body.get("status", "")).lower()
     if poll_state != "success":
         error_message = str(poll_body.get("message") or poll_body.get("status_ext") or "spn2_poll_error")
+        _verbose_log(config, f"[poll failed] code={unique_code or '-'} error={error_message}")
         return False, {}, error_message, detect_service_failure(poll_status)
 
     timestamp = str(poll_body.get("timestamp") or "").strip()
     if not timestamp:
+        _verbose_log(config, f"[poll failed] code={unique_code or '-'} reason=missing_timestamp")
         return False, {}, "spn2_missing_timestamp", False
 
     archive_url, content_url = _build_archive_urls(source_url, timestamp)
+    _verbose_log(
+        config,
+        f"[success] code={unique_code or '-'} timestamp={timestamp} status={poll_status if poll_status is not None else '-'}",
+    )
     return True, {
         "url": archive_url,
         "content_url": content_url,
@@ -229,10 +269,19 @@ def _run_single_wayback(
     }, "", False
 
 
-def run_wayback_job(config: WaybackJobConfig) -> WaybackJobReport:
-    store = LedgerStore(config.ledger_dir)
-    report = WaybackJobReport()
+def _dedupe_keep_order(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    output: list[str] = []
+    for value in values:
+        code = str(value).strip()
+        if not code or code in seen:
+            continue
+        seen.add(code)
+        output.append(code)
+    return output
 
+
+def select_candidates(config: WaybackJobConfig, store: LedgerStore) -> list[str]:
     candidates = filter_stage_records(
         store,
         allowed_states=config.allowed_states,
@@ -241,21 +290,66 @@ def run_wayback_job(config: WaybackJobConfig) -> WaybackJobReport:
         max_attempts=2,
         lookback_days=config.lookback_days,
     )
-    report.selected = len(candidates)
     limit = config.max_records if config.max_records > 0 else len(candidates)
-    consecutive_service_failures = 0
+    selected_codes = [item.unique_code for item in candidates[:limit]]
+    _verbose_job_log(
+        config,
+        (
+            f"candidate_count={len(candidates)} selected={len(selected_codes)} "
+            f"max_records={config.max_records} lookback_days={config.lookback_days} "
+            f"code_filter_size={len(config.code_filter)} allowed_states={sorted(config.allowed_states)}"
+        ),
+    )
+    if config.verbose and selected_codes:
+        preview = selected_codes[:25]
+        print(f"[wayback verbose] selected codes preview ({len(preview)}/{len(selected_codes)}):")
+        for code in preview:
+            print(f"[wayback verbose]   {code}")
+    return selected_codes
 
-    for item in candidates[:limit]:
-        unique_code = item.unique_code
-        record = item.record
+
+def run_selected(
+    selected_codes: list[str],
+    stage_config: WaybackStageConfig,
+    store: LedgerStore,
+) -> JobRunResult[WaybackJobReport]:
+    codes = _dedupe_keep_order(selected_codes)
+    report = WaybackJobReport(selected=len(codes))
+    consecutive_service_failures = 0
+    _verbose_log(
+        stage_config,
+        (
+            f"selected={report.selected} dry_run={stage_config.dry_run} "
+            f"timeout_sec={stage_config.timeout_sec} poll_interval_sec={stage_config.poll_interval_sec} "
+            f"poll_timeout_sec={stage_config.poll_timeout_sec} "
+            f"service_failure_limit={stage_config.service_failure_limit}"
+        ),
+    )
+
+    for index, unique_code in enumerate(codes, start=1):
+        _verbose_log(stage_config, f"[{index}/{len(codes)}] code={unique_code}")
+        record = store.find(unique_code)
+        if record is None:
+            report.skipped += 1
+            report.skipped_codes.append(unique_code)
+            _verbose_log(stage_config, f"[skip] code={unique_code} reason=missing_record")
+            continue
+
+        source_url = str(record.get("source_url") or "").strip()
+        if not source_url:
+            report.skipped += 1
+            report.skipped_codes.append(unique_code)
+            _verbose_log(stage_config, f"[skip] code={unique_code} reason=missing_source_url")
+            continue
+
         report.processed += 1
         report.processed_codes.append(unique_code)
 
-        if config.dry_run:
+        if stage_config.dry_run:
             continue
 
         try:
-            success, metadata, error_text, service_failure = _run_single_wayback(record, config)
+            success, metadata, error_text, service_failure = _run_single_wayback(record, stage_config)
             if success:
                 store.apply_stage_result(
                     unique_code=unique_code,
@@ -264,7 +358,9 @@ def run_wayback_job(config: WaybackJobConfig) -> WaybackJobReport:
                     metadata=metadata,
                 )
                 report.success += 1
+                report.success_codes.append(unique_code)
                 consecutive_service_failures = 0
+                _verbose_log(stage_config, f"[success] code={unique_code}")
             else:
                 store.apply_stage_result(
                     unique_code=unique_code,
@@ -273,6 +369,14 @@ def run_wayback_job(config: WaybackJobConfig) -> WaybackJobReport:
                     error=error_text or "wayback_upload_failed",
                 )
                 report.failed += 1
+                report.failed_codes.append(unique_code)
+                _verbose_log(
+                    stage_config,
+                    (
+                        f"[failed] code={unique_code} error={error_text or 'wayback_upload_failed'} "
+                        f"service_failure={service_failure}"
+                    ),
+                )
                 if service_failure:
                     report.service_failures += 1
                     consecutive_service_failures += 1
@@ -280,10 +384,14 @@ def run_wayback_job(config: WaybackJobConfig) -> WaybackJobReport:
                     consecutive_service_failures = 0
         except RetryLimitExceededError:
             report.skipped += 1
+            report.skipped_codes.append(unique_code)
+            _verbose_log(stage_config, f"[skip] code={unique_code} reason=retry_limit_exceeded")
         except Exception as exc:
             report.failed += 1
+            report.failed_codes.append(unique_code)
             report.service_failures += 1
             consecutive_service_failures += 1
+            _verbose_log(stage_config, f"[exception] code={unique_code} error={exc}")
             try:
                 store.apply_stage_result(
                     unique_code=unique_code,
@@ -294,11 +402,26 @@ def run_wayback_job(config: WaybackJobConfig) -> WaybackJobReport:
             except Exception:
                 pass
 
-        if consecutive_service_failures >= max(1, config.service_failure_limit):
+        if consecutive_service_failures >= max(1, stage_config.service_failure_limit):
             report.stopped_early = True
+            _verbose_log(
+                stage_config,
+                (
+                    "stopping_early reason=service_failure_limit "
+                    f"consecutive={consecutive_service_failures}/{stage_config.service_failure_limit}"
+                ),
+            )
             break
 
-    return report
+    if report.stopped_early:
+        return JobRunResult(
+            report=report,
+            fatal_error=(
+                "wayback job stopped early after hitting consecutive service failure limit "
+                f"({stage_config.service_failure_limit})"
+            ),
+        )
+    return JobRunResult(report=report)
 
 
 def configure_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
@@ -341,6 +464,7 @@ def configure_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser
         help="Set SPN2 delay_wb_availability=0",
     )
     parser.add_argument("--dry-run", action="store_true", help="Plan records without uploading")
+    parser.add_argument("--verbose", action="store_true", help="Print detailed selection and per-record SPN2 status")
     return parser
 
 
@@ -363,26 +487,33 @@ def run_from_args(args: argparse.Namespace) -> int:
     access_key = args.ia_access_key or os.environ.get("IA_ACCESS_KEY", "")
     secret_key = args.ia_secret_key or os.environ.get("IA_SECRET_KEY", "")
 
-    config = WaybackJobConfig(
-        ledger_dir=Path(args.ledger_dir).resolve(),
+    store = LedgerStore(Path(args.ledger_dir).resolve())
+    job_config = WaybackJobConfig(
         max_records=max(0, args.max_records),
         lookback_days=max(0, args.lookback_days),
+        code_filter=code_filter,
+        allowed_states=allowed_states,
+        verbose=args.verbose,
+    )
+    stage_config = WaybackStageConfig(
         dry_run=args.dry_run,
         timeout_sec=max(1, args.timeout_sec),
         poll_interval_sec=max(0.1, args.poll_interval_sec),
         poll_timeout_sec=max(1, args.poll_timeout_sec),
         service_failure_limit=max(1, args.service_failure_limit),
-        code_filter=code_filter,
-        allowed_states=allowed_states,
         access_key=access_key,
         secret_key=secret_key,
         capture_all=args.capture_all,
         skip_first_archive=args.skip_first_archive,
         delay_wb_availability=not args.no_delay_wb_availability,
+        verbose=args.verbose,
     )
-
-    report = run_wayback_job(config)
-    _print_report(report)
+    selected_codes = select_candidates(job_config, store)
+    result = run_selected(selected_codes, stage_config, store)
+    _print_report(result.report)
+    if result.fatal_error:
+        print(result.fatal_error)
+        return 1
     return 0
 
 

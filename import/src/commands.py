@@ -160,7 +160,7 @@ class ArchiveJobCommand(Command):
 class ImportPdfJobCommand(Command):
     name = "job-import-pdf"
     help = "Run import-pdf stage job"
-    description = "Import local PDFs into LFS/pdfs and optionally sync to Hugging Face."
+    description = "Upload downloaded PDFs referenced in ledger download.path to Hugging Face."
 
     def configure_parser(self, parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         return import_pdf_job.configure_parser(parser)
@@ -211,7 +211,7 @@ class PdfInfoJobCommand(Command):
 class DownloadUploadPdfInfoWorkflowCommand(Command):
     name = "wrk-download-upload-pdfinfo"
     help = "Run batch workflow: download -> upload -> pdf-info"
-    description = "Run one batch that downloads PDFs, uploads those PDFs to HF, then computes pdf_info."
+    description = "Run partition-wise workflow: for each year, download PDFs, upload to HF, then compute pdf_info in batches."
 
     def configure_parser(self, parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         return download_upload_pdfinfo_wrk.configure_parser(parser)

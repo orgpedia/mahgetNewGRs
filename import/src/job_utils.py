@@ -7,7 +7,7 @@ import json
 from datetime import date, datetime, timedelta, timezone
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Generic, Iterable, Sequence, TypeVar
 
 from info_store import InfoStore as LedgerStore
 
@@ -16,6 +16,24 @@ from info_store import InfoStore as LedgerStore
 class StageRecord:
     unique_code: str
     record: dict[str, Any]
+
+
+TReport = TypeVar("TReport")
+
+
+@dataclass
+class JobRunResult(Generic[TReport]):
+    report: TReport
+    fatal_error: str = ""
+
+    @property
+    def is_fatal(self) -> bool:
+        return bool(self.fatal_error)
+
+
+def chunked(items: Sequence[str], chunk_size: int) -> list[list[str]]:
+    size = max(1, int(chunk_size))
+    return [list(items[index : index + size]) for index in range(0, len(items), size)]
 
 
 def load_code_filter(codes: Iterable[str], codes_file: str | None) -> set[str]:
@@ -104,6 +122,7 @@ def filter_stage_records(
     lookback_days: int = 0,
 ) -> list[StageRecord]:
     selected: list[StageRecord] = []
+
     codes = code_filter or set()
     for record in store.iter_records():
         unique_code = str(record.get("unique_code", "")).strip()
@@ -114,8 +133,8 @@ def filter_stage_records(
         if not is_record_within_lookback(record, lookback_days):
             continue
         state = str(record.get("state", "")).strip()
-        if allowed_states and state not in allowed_states:
-            continue
+        # if allowed_states and state not in allowed_states:
+        #     continue
         attempts = record.get("attempt_counts", {})
         stage_attempts = attempts.get(stage, 0) if isinstance(attempts, dict) else 0
         if isinstance(stage_attempts, int) and stage_attempts >= max_attempts:

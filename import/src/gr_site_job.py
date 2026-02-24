@@ -15,9 +15,9 @@ from urllib.parse import unquote
 
 from department_codes import department_code_from_name
 from info_store import InfoStore as LedgerStore
+from job_utils import JobRunResult
 from ledger_engine import STATE_FETCHED
 from local_env import load_local_env
-from download_pdf_job import DownloadStageConfig, DownloadStageReport, run_download_stage
 
 
 LONG_DIGITS_RE = re.compile(r"\d{16,22}")
@@ -39,6 +39,26 @@ class CrawledRecord:
     source_file: str
 
 
+@dataclass(frozen=True)
+class GRSiteJobConfig:
+    mode: str
+    source_dir: Path | None
+    source_json_files: list[Path]
+    crawl_date: str
+    max_records: int
+    verbose: bool = False
+
+
+@dataclass(frozen=True)
+class GRSiteStageConfig:
+    mode: str
+    crawl_date: str
+    max_records: int
+    dry_run: bool
+    show_sample: int
+    verbose: bool = False
+
+
 @dataclass
 class GRSiteReport:
     mode: str
@@ -48,7 +68,6 @@ class GRSiteReport:
     touched_codes: list[str] | None = None
     stop_pages: int = 0
     writes_enabled: bool = False
-    download_report: DownloadStageReport | None = None
 
 
 def clean_text(value: Any) -> str:
@@ -245,6 +264,7 @@ def configure_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser
     parser.add_argument("--max-records", type=int, default=0, help="Optional cap on records applied")
     parser.add_argument("--dry-run", action="store_true", help="Plan actions without writing ledger")
     parser.add_argument("--show-sample", type=int, default=10, help="Print up to N sample codes")
+    parser.add_argument("--verbose", action="store_true", help="Print detailed source selection and stage status")
     return parser
 
 
@@ -260,18 +280,17 @@ def _print_samples(name: str, values: list[str], limit: int) -> None:
         print(f"  {value}")
 
 
-def _print_download_report(download_report: DownloadStageReport) -> None:
-    print("Download stage:")
-    _summarize_counts("  selected", download_report.selected)
-    _summarize_counts("  processed", download_report.processed)
-    _summarize_counts("  success", download_report.success)
-    _summarize_counts("  failed", download_report.failed)
-    _summarize_counts("  skipped", download_report.skipped)
-    _summarize_counts("  service_failures", download_report.service_failures)
-    print(f"  stopped_early: {download_report.stopped_early}")
+def _verbose_job_log(config: GRSiteJobConfig, message: str) -> None:
+    if config.verbose:
+        print(f"[gr-site verbose] {message}")
 
 
-def run_daily(
+def _verbose_log(config: GRSiteStageConfig, message: str) -> None:
+    if config.verbose:
+        print(f"[gr-site verbose] {message}")
+
+
+def _run_daily(
     store: LedgerStore,
     records: list[CrawledRecord],
     *,
@@ -279,10 +298,6 @@ def run_daily(
     max_records: int,
     dry_run: bool,
     show_sample: int,
-    skip_download: bool,
-    lfs_root: Path,
-    download_timeout_sec: int,
-    service_failure_limit: int,
 ) -> GRSiteReport:
     known_codes = set(rec.get("unique_code") for rec in store.iter_records() if isinstance(rec.get("unique_code"), str))
     grouped = group_daily_by_department_and_page(records)
@@ -321,20 +336,6 @@ def run_daily(
         writes_enabled=not dry_run,
     )
 
-    if not skip_download and report.discovered_codes:
-        report.download_report = run_download_stage(
-            DownloadStageConfig(
-                ledger_dir=store.ledger_dir,
-                lfs_root=lfs_root.resolve(),
-                timeout_sec=max(1, download_timeout_sec),
-                service_failure_limit=max(1, service_failure_limit),
-                max_records=max_records,
-                dry_run=dry_run,
-                code_filter=set(report.discovered_codes),
-                allowed_states={"FETCHED"},
-            )
-        )
-
     print("Mode: daily")
     _summarize_counts("Input records", report.input_records)
     _summarize_counts("Known ledger records", len(known_codes))
@@ -342,44 +343,17 @@ def run_daily(
     _summarize_counts("Discovered new records", len(report.discovered_codes or []))
     print(f"Writes enabled: {report.writes_enabled}")
     _print_samples("Discovered codes", report.discovered_codes or [], show_sample)
-    if report.download_report:
-        _print_download_report(report.download_report)
     return report
 
 
-def run_weekly(
-    store: LedgerStore,
-    *,
-    max_records: int,
-    dry_run: bool,
-    skip_download: bool,
-    lfs_root: Path,
-    download_timeout_sec: int,
-    service_failure_limit: int,
-) -> GRSiteReport:
+def _run_weekly(store: LedgerStore, *, dry_run: bool) -> GRSiteReport:
     report = GRSiteReport(mode="weekly", input_records=0, writes_enabled=not dry_run)
     print("Mode: weekly")
     print("Crawl step: skipped (weekly policy)")
-    if skip_download:
-        print("Download stage: skipped by flag")
-        return report
-
-    report.download_report = run_download_stage(
-        DownloadStageConfig(
-            ledger_dir=store.ledger_dir,
-            lfs_root=lfs_root.resolve(),
-            timeout_sec=max(1, download_timeout_sec),
-            service_failure_limit=max(1, service_failure_limit),
-            max_records=max_records,
-            dry_run=dry_run,
-            allowed_states={"DOWNLOAD_FAILED", "ARCHIVE_UPLOADED_WITHOUT_DOCUMENT"},
-        )
-    )
-    _print_download_report(report.download_report)
     return report
 
 
-def run_monthly(
+def _run_monthly(
     store: LedgerStore,
     records: list[CrawledRecord],
     *,
@@ -446,6 +420,71 @@ def run_monthly(
     return report
 
 
+def select_candidates(config: GRSiteJobConfig, _store: LedgerStore) -> list[CrawledRecord]:
+    if config.mode == "weekly":
+        _verbose_job_log(config, "weekly mode selected; returning no crawl candidates")
+        return []
+
+    source_files = gather_source_files(source_dir=config.source_dir, source_json_files=config.source_json_files)
+    if not source_files:
+        raise FileNotFoundError("No source crawl files found. Use --source-dir or --source-json.")
+    _verbose_job_log(
+        config,
+        (
+            f"mode={config.mode} source_files={len(source_files)} max_records={config.max_records} "
+            f"crawl_date={config.crawl_date}"
+        ),
+    )
+    if config.verbose and source_files:
+        preview = source_files[:10]
+        print(f"[gr-site verbose] source file preview ({len(preview)}/{len(source_files)}):")
+        for source_file in preview:
+            print(f"[gr-site verbose]   {source_file}")
+
+    records = normalize_rows(source_files=source_files, fallback_crawl_date=config.crawl_date)
+    if not records:
+        raise ValueError("No usable crawl records found after normalization.")
+    _verbose_job_log(config, f"normalized_records={len(records)}")
+    return records
+
+
+def run_selected(
+    selected: list[CrawledRecord],
+    stage_config: GRSiteStageConfig,
+    store: LedgerStore,
+) -> JobRunResult[GRSiteReport]:
+    _verbose_log(
+        stage_config,
+        (
+            f"mode={stage_config.mode} selected={len(selected)} dry_run={stage_config.dry_run} "
+            f"max_records={stage_config.max_records} show_sample={stage_config.show_sample}"
+        ),
+    )
+    if stage_config.mode == "weekly":
+        return JobRunResult(report=_run_weekly(store, dry_run=stage_config.dry_run))
+    if stage_config.mode == "daily":
+        return JobRunResult(
+            report=_run_daily(
+                store,
+                selected,
+                crawl_date=stage_config.crawl_date,
+                max_records=stage_config.max_records,
+                dry_run=stage_config.dry_run,
+                show_sample=stage_config.show_sample,
+            )
+        )
+    return JobRunResult(
+        report=_run_monthly(
+            store,
+            selected,
+            crawl_date=stage_config.crawl_date,
+            max_records=stage_config.max_records,
+            dry_run=stage_config.dry_run,
+            show_sample=stage_config.show_sample,
+        )
+    )
+
+
 def run_from_args(args: argparse.Namespace) -> int:
     ledger_dir = Path(args.ledger_dir).resolve()
     store = LedgerStore(ledger_dir)
@@ -459,53 +498,33 @@ def run_from_args(args: argparse.Namespace) -> int:
     else:
         crawl_date = datetime.now(timezone.utc).date().isoformat()
 
-    if args.mode == "weekly":
-        run_weekly(
-            store=store,
-            max_records=max(0, args.max_records),
-            dry_run=args.dry_run,
-            skip_download=True,
-            lfs_root=Path("LFS/pdfs"),
-            download_timeout_sec=30,
-            service_failure_limit=10,
-        )
-        return 0
-
-    source_dir = Path(args.source_dir).resolve() if args.source_dir else None
-    source_json_files = [Path(path).resolve() for path in args.source_json]
-    source_files = gather_source_files(source_dir=source_dir, source_json_files=source_json_files)
-    if not source_files:
-        print("No source crawl files found. Use --source-dir or --source-json.")
-        return 2
-
-    records = normalize_rows(source_files=source_files, fallback_crawl_date=crawl_date)
-    if not records:
-        print("No usable crawl records found after normalization.")
-        return 2
-
-    if args.mode == "daily":
-        run_daily(
-            store=store,
-            records=records,
-            crawl_date=crawl_date,
-            max_records=max(0, args.max_records),
-            dry_run=args.dry_run,
-            show_sample=max(0, args.show_sample),
-            skip_download=True,
-            lfs_root=Path("LFS/pdfs"),
-            download_timeout_sec=30,
-            service_failure_limit=10,
-        )
-        return 0
-
-    run_monthly(
-        store=store,
-        records=records,
+    job_config = GRSiteJobConfig(
+        mode=args.mode,
+        source_dir=Path(args.source_dir).resolve() if args.source_dir else None,
+        source_json_files=[Path(path).resolve() for path in args.source_json],
+        crawl_date=crawl_date,
+        max_records=max(0, args.max_records),
+        verbose=args.verbose,
+    )
+    stage_config = GRSiteStageConfig(
+        mode=args.mode,
         crawl_date=crawl_date,
         max_records=max(0, args.max_records),
         dry_run=args.dry_run,
         show_sample=max(0, args.show_sample),
+        verbose=args.verbose,
     )
+
+    try:
+        selected = select_candidates(job_config, store)
+    except (FileNotFoundError, ValueError) as exc:
+        print(str(exc))
+        return 2
+
+    result = run_selected(selected, stage_config, store)
+    if result.fatal_error:
+        print(result.fatal_error)
+        return 1
     return 0
 
 

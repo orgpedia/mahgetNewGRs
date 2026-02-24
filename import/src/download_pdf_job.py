@@ -7,12 +7,14 @@ import hashlib
 import re
 import urllib.error
 import urllib.request
+import time
 from datetime import datetime
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from info_store import InfoStore as LedgerStore
 from job_utils import (
+    JobRunResult,
     StageRecord,
     detect_service_failure,
     ensure_parent_dir,
@@ -23,7 +25,7 @@ from job_utils import (
     print_stage_report,
     sha1_file,
 )
-from ledger_engine import RetryLimitExceededError, to_ledger_relative_path
+from ledger_engine import InvalidTransitionError, RetryLimitExceededError, to_ledger_relative_path
 from local_env import load_local_env
 
 
@@ -37,16 +39,21 @@ DEFAULT_ALLOWED_STATES = {
 
 
 @dataclass(frozen=True)
+class DownloadJobConfig:
+    max_records: int
+    lookback_days: int
+    code_filter: set[str] = field(default_factory=set)
+    allowed_states: set[str] = field(default_factory=lambda: set(DEFAULT_ALLOWED_STATES))
+    verbose: bool = False
+
+
+@dataclass(frozen=True)
 class DownloadStageConfig:
-    ledger_dir: Path
     lfs_root: Path
     timeout_sec: int
     service_failure_limit: int
-    max_records: int
-    lookback_days: int
     dry_run: bool
-    code_filter: set[str] = field(default_factory=set)
-    allowed_states: set[str] = field(default_factory=lambda: set(DEFAULT_ALLOWED_STATES))
+    verbose: bool = False
 
 
 @dataclass
@@ -59,6 +66,9 @@ class DownloadStageReport:
     service_failures: int = 0
     stopped_early: bool = False
     processed_codes: list[str] = field(default_factory=list)
+    success_codes: list[str] = field(default_factory=list)
+    failed_codes: list[str] = field(default_factory=list)
+    skipped_codes: list[str] = field(default_factory=list)
 
 
 def safe_filename(value: str) -> str:
@@ -93,31 +103,11 @@ def sha1_bytes(content: bytes) -> str:
     return digest.hexdigest().upper()
 
 
-def _download_attempts(record: dict) -> int:
-    attempts = record.get("attempt_counts", {})
-    if not isinstance(attempts, dict):
-        return 0
-    value = attempts.get("download", 0)
-    if isinstance(value, int):
-        return value
-    try:
-        return int(value)
-    except Exception:
-        return 0
-
-
 def _missing_lfs_path(record: dict) -> bool:
     value = record.get("lfs_path")
     if isinstance(value, str):
         return not value.strip()
     return True
-
-
-def _is_stage_retry_eligible(record: dict, allowed_states: set[str]) -> bool:
-    state = str(record.get("state") or "").strip()
-    if allowed_states and state not in allowed_states:
-        return False
-    return _download_attempts(record) < 2
 
 
 def _record_gr_datetime(record: dict) -> datetime | None:
@@ -138,7 +128,7 @@ def _download_candidate_sort_key(item: StageRecord) -> tuple[int, int, str]:
     return (1, 0, item.unique_code)
 
 
-def _select_download_candidates(store: LedgerStore, config: DownloadStageConfig) -> list[StageRecord]:
+def _select_download_candidates(store: LedgerStore, config: DownloadJobConfig) -> list[StageRecord]:
     stage_candidates = filter_stage_records(
         store,
         allowed_states=config.allowed_states,
@@ -147,25 +137,27 @@ def _select_download_candidates(store: LedgerStore, config: DownloadStageConfig)
         max_attempts=2,
         lookback_days=config.lookback_days,
     )
+    print(f'Stage candidates: {len(stage_candidates)}')
     by_code: dict[str, StageRecord] = {item.unique_code: item for item in stage_candidates}
 
-    for record in store.iter_records():
+    result_candidates = []
+    for stage_record in stage_candidates:
+        record = stage_record.record
         unique_code = str(record.get("unique_code") or "").strip()
-        if not unique_code or unique_code in by_code:
-            continue
+
         if config.code_filter and unique_code not in config.code_filter:
             continue
-        if not is_record_within_lookback(record, config.lookback_days):
-            continue
+
         if not _missing_lfs_path(record):
             continue
-        by_code[unique_code] = StageRecord(unique_code=unique_code, record=record)
-
-    return sorted(by_code.values(), key=_download_candidate_sort_key)
+        result_candidates.append(stage_record)
+    print(f'Result candidates: {len(result_candidates)}')
+    return result_candidates
 
 
 def _download_content(url: str, timeout_sec: int) -> tuple[int | None, bytes | None, str]:
     request = urllib.request.Request(url, method="GET")
+    time.sleep(1)
     try:
         with urllib.request.urlopen(request, timeout=timeout_sec) as response:
             status_code = int(getattr(response, "status", 200))
@@ -181,33 +173,105 @@ def _download_content(url: str, timeout_sec: int) -> tuple[int | None, bytes | N
         return None, None, f"download_exception:{exc}"
 
 
-def run_download_stage(config: DownloadStageConfig) -> DownloadStageReport:
-    store = LedgerStore(config.ledger_dir)
-    report = DownloadStageReport()
+def _verbose_log(config: DownloadStageConfig, message: str) -> None:
+    if config.verbose:
+        print(f"[download verbose] {message}")
 
+
+def _verbose_job_log(config: DownloadJobConfig, message: str) -> None:
+    if config.verbose:
+        print(f"[download verbose] {message}")
+
+
+def _verbose_saved(
+    config: DownloadStageConfig,
+    *,
+    unique_code: str,
+    success: bool,
+    error: str = "",
+) -> None:
+    if not config.verbose:
+        return
+    status = "success" if success else "failed"
+    suffix = f" error={error}" if error else ""
+    print(f"**[download save] code={unique_code} status={status}{suffix}**")
+
+
+def _dedupe_keep_order(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    output: list[str] = []
+    for value in values:
+        code = str(value).strip()
+        if not code or code in seen:
+            continue
+        seen.add(code)
+        output.append(code)
+    return output
+
+
+def select_candidates(config: DownloadJobConfig, store: LedgerStore) -> list[str]:
     candidates = _select_download_candidates(store, config)
-    report.selected = len(candidates)
-
     limit = config.max_records if config.max_records > 0 else len(candidates)
-    consecutive_service_failures = 0
+    selected_codes = [item.unique_code for item in candidates[:limit]]
+    _verbose_job_log(
+        config,
+        (
+            f"candidate_count={len(candidates)} selected={len(selected_codes)} "
+            f"max_records={config.max_records} lookback_days={config.lookback_days} "
+            f"code_filter_size={len(config.code_filter)}"
+        ),
+    )
+    if config.verbose and selected_codes:
+        preview = selected_codes[:25]
+        print(f"[download verbose] selected codes preview ({len(preview)}/{len(selected_codes)}):")
+        for code in preview:
+            print(f"[download verbose]   {code}")
+    return selected_codes
 
-    for item in candidates[:limit]:
-        record = item.record
-        unique_code = item.unique_code
-        use_stage_transition = _is_stage_retry_eligible(record, config.allowed_states)
+
+def run_selected(
+    selected_codes: list[str],
+    stage_config: DownloadStageConfig,
+    store: LedgerStore,
+) -> JobRunResult[DownloadStageReport]:
+    report = DownloadStageReport(selected=len(_dedupe_keep_order(selected_codes)))
+    consecutive_service_failures = 0
+    codes = _dedupe_keep_order(selected_codes)
+
+    _verbose_log(
+        stage_config,
+        (
+            f"selected={report.selected} dry_run={stage_config.dry_run} "
+            f"timeout_sec={stage_config.timeout_sec} service_failure_limit={stage_config.service_failure_limit}"
+        ),
+    )
+
+    for index, unique_code in enumerate(codes, start=1):
+        _verbose_log(stage_config, f"[{index}/{len(codes)}] code={unique_code}")
+        record = store.find(unique_code)
+        if record is None:
+            report.skipped += 1
+            report.skipped_codes.append(unique_code)
+            _verbose_log(stage_config, f"[skip] code={unique_code} reason=missing_record")
+            continue
+
         source_url = str(record.get("source_url") or "").strip()
         if not source_url:
             report.skipped += 1
+            report.skipped_codes.append(unique_code)
+            _verbose_log(stage_config, f"[skip] code={unique_code} reason=missing_source_url")
             continue
 
         report.processed += 1
         report.processed_codes.append(unique_code)
 
-        pdf_path = derive_pdf_path(record, config.lfs_root)
+        pdf_path = derive_pdf_path(record, stage_config.lfs_root)
         if not pdf_path.is_absolute():
             pdf_path = Path.cwd() / pdf_path
+        planned_path = to_ledger_relative_path(pdf_path)
+        _verbose_log(stage_config, f"[plan] code={unique_code} url={source_url} path={planned_path}")
 
-        if config.dry_run:
+        if stage_config.dry_run:
             continue
 
         try:
@@ -219,32 +283,21 @@ def run_download_stage(config: DownloadStageConfig) -> DownloadStageReport:
                     "hash": file_hash,
                     "size": file_size,
                 }
-                if use_stage_transition:
-                    store.apply_stage_result(
-                        unique_code=unique_code,
-                        stage="download",
-                        success=True,
-                        metadata=metadata,
-                    )
-                else:
-                    store.update(
-                        {
-                            "record_key": unique_code,
-                            "download": {
-                                "status": "success",
-                                "error": "",
-                                "path": metadata["path"],
-                                "hash": metadata["hash"],
-                                "size": metadata["size"],
-                            },
-                            "lfs_path": metadata["path"],
-                        }
-                    )
+                store.apply_stage_result(
+                    unique_code=unique_code,
+                    stage="download",
+                    success=True,
+                    metadata=metadata,
+                )
+                _verbose_saved(stage_config, unique_code=unique_code, success=True)
                 report.success += 1
+                report.success_codes.append(unique_code)
                 consecutive_service_failures = 0
+                _verbose_log(stage_config, f"[reuse] code={unique_code} path={metadata['path']} size={file_size}")
                 continue
 
-            status_code, content, error_text = _download_content(source_url, config.timeout_sec)
+            _verbose_log(stage_config, f"[download] code={unique_code} url={source_url}")
+            status_code, content, error_text = _download_content(source_url, stage_config.timeout_sec)
             is_service_failure = detect_service_failure(status_code=status_code)
             if status_code == 200 and content is not None:
                 ensure_parent_dir(pdf_path)
@@ -254,88 +307,97 @@ def run_download_stage(config: DownloadStageConfig) -> DownloadStageReport:
                     "hash": sha1_bytes(content),
                     "size": len(content),
                 }
-                if use_stage_transition:
-                    store.apply_stage_result(
-                        unique_code=unique_code,
-                        stage="download",
-                        success=True,
-                        metadata=metadata,
-                    )
-                else:
-                    store.update(
-                        {
-                            "record_key": unique_code,
-                            "download": {
-                                "status": "success",
-                                "error": "",
-                                "path": metadata["path"],
-                                "hash": metadata["hash"],
-                                "size": metadata["size"],
-                            },
-                            "lfs_path": metadata["path"],
-                        }
-                    )
+                store.apply_stage_result(
+                    unique_code=unique_code,
+                    stage="download",
+                    success=True,
+                    metadata=metadata,
+                )
+                _verbose_saved(stage_config, unique_code=unique_code, success=True)
                 report.success += 1
+                report.success_codes.append(unique_code)
                 consecutive_service_failures = 0
+                _verbose_log(
+                    stage_config,
+                    f"[success] code={unique_code} status={status_code} path={metadata['path']} size={metadata['size']}",
+                )
             else:
                 failure_text = error_text or f"download_failed_{status_code}"
-                if use_stage_transition:
-                    store.apply_stage_result(
-                        unique_code=unique_code,
-                        stage="download",
-                        success=False,
-                        error=failure_text,
-                    )
-                else:
-                    store.update(
-                        {
-                            "record_key": unique_code,
-                            "download": {
-                                "status": "failed",
-                                "error": failure_text,
-                            },
-                        }
-                    )
+                store.apply_stage_result(
+                    unique_code=unique_code,
+                    stage="download",
+                    success=False,
+                    error=failure_text,
+                )
+                _verbose_saved(stage_config, unique_code=unique_code, success=False, error=failure_text)
                 report.failed += 1
+                report.failed_codes.append(unique_code)
+                _verbose_log(
+                    stage_config,
+                    f"[failed] code={unique_code} status={status_code if status_code is not None else '-'} "
+                    f"error={failure_text} url={source_url}",
+                )
                 if is_service_failure:
                     consecutive_service_failures += 1
                     report.service_failures += 1
+                    _verbose_log(
+                        stage_config,
+                        f"[service-failure] consecutive={consecutive_service_failures}/{stage_config.service_failure_limit}",
+                    )
                 else:
                     consecutive_service_failures = 0
         except RetryLimitExceededError:
             report.skipped += 1
+            report.skipped_codes.append(unique_code)
+            _verbose_log(stage_config, f"[skip] code={unique_code} reason=retry_limit_exceeded")
+        except InvalidTransitionError as exc:
+            report.skipped += 1
+            report.skipped_codes.append(unique_code)
+            consecutive_service_failures = 0
+            _verbose_log(stage_config, f"[skip] code={unique_code} reason=invalid_transition error={exc}")
         except Exception as exc:
             report.failed += 1
+            report.failed_codes.append(unique_code)
             report.service_failures += 1
             consecutive_service_failures += 1
-            if not config.dry_run:
-                try:
-                    failure_text = f"download_exception:{exc}"
-                    if use_stage_transition:
-                        store.apply_stage_result(
-                            unique_code=unique_code,
-                            stage="download",
-                            success=False,
-                            error=failure_text,
-                        )
-                    else:
-                        store.update(
-                            {
-                                "record_key": unique_code,
-                                "download": {
-                                    "status": "failed",
-                                    "error": failure_text,
-                                },
-                            }
-                        )
-                except Exception:
-                    pass
+            _verbose_log(stage_config, f"[exception] code={unique_code} error={exc}")
+            try:
+                failure_text = f"download_exception:{exc}"
+                store.apply_stage_result(
+                    unique_code=unique_code,
+                    stage="download",
+                    success=False,
+                    error=failure_text,
+                )
+                _verbose_saved(stage_config, unique_code=unique_code, success=False, error=failure_text)
+            except Exception:
+                pass
 
-        if consecutive_service_failures >= config.service_failure_limit:
+        if consecutive_service_failures >= stage_config.service_failure_limit:
             report.stopped_early = True
+            _verbose_log(
+                stage_config,
+                "stopping_early reason=service_failure_limit "
+                f"consecutive={consecutive_service_failures}",
+            )
             break
 
-    return report
+    _verbose_log(
+        stage_config,
+        "completed "
+        f"processed={report.processed} success={report.success} failed={report.failed} "
+        f"skipped={report.skipped} service_failures={report.service_failures} stopped_early={report.stopped_early}",
+    )
+
+    if report.stopped_early:
+        return JobRunResult(
+            report=report,
+            fatal_error=(
+                "download job stopped early after hitting consecutive service failure limit "
+                f"({stage_config.service_failure_limit})"
+            ),
+        )
+    return JobRunResult(report=report)
 
 
 def _print_report(report: DownloadStageReport) -> None:
@@ -373,6 +435,7 @@ def configure_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser
         help="Stop after N consecutive service failures",
     )
     parser.add_argument("--dry-run", action="store_true", help="Plan records without downloading")
+    parser.add_argument("--verbose", action="store_true", help="Print per-record download status details")
     return parser
 
 
@@ -380,19 +443,27 @@ def run_from_args(args: argparse.Namespace) -> int:
     code_filter = load_code_filter(args.code, args.codes_file or None)
     allowed_states = parse_state_list(args.allowed_state) or set(DEFAULT_ALLOWED_STATES)
 
-    config = DownloadStageConfig(
-        ledger_dir=Path(args.ledger_dir).resolve(),
+    store = LedgerStore(Path(args.ledger_dir).resolve())
+    job_config = DownloadJobConfig(
+        max_records=max(0, args.max_records),
+        lookback_days=max(0, args.lookback_days),
+        code_filter=code_filter,
+        allowed_states=allowed_states,
+        verbose=args.verbose,
+    )
+    stage_config = DownloadStageConfig(
         lfs_root=Path(args.lfs_root).resolve(),
         timeout_sec=max(1, args.timeout_sec),
         service_failure_limit=max(1, args.service_failure_limit),
-        max_records=max(0, args.max_records),
-        lookback_days=max(0, args.lookback_days),
         dry_run=args.dry_run,
-        code_filter=code_filter,
-        allowed_states=allowed_states,
+        verbose=args.verbose,
     )
-    report = run_download_stage(config)
-    _print_report(report)
+    selected_codes = select_candidates(job_config, store)
+    result = run_selected(selected_codes, stage_config, store)
+    _print_report(result.report)
+    if result.fatal_error:
+        print(result.fatal_error)
+        return 1
     return 0
 
 

@@ -360,8 +360,7 @@ class LedgerStore:
         records: list[dict[str, Any]] = []
         for partition in self.list_partitions():
             rows = self._read_partition(partition)
-            for row in rows:
-                records.append(copy.deepcopy(row))
+            records.extend(rows)
         return records
 
     def exists(self, unique_code: str) -> bool:
@@ -372,7 +371,7 @@ class LedgerStore:
         if location is None:
             return None
         rows = self._read_partition(location.partition)
-        return copy.deepcopy(rows[location.index])
+        return rows[location.index]
 
     def upsert(
         self,

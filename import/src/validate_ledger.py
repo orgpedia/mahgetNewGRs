@@ -59,8 +59,8 @@ PDF_REQUIRED_FIELDS = {
     "record_key",
     "status",
     "created_at_utc",
-    "updated_at_utc",
 }
+PDF_OPTIONAL_FIELDS = {"updated_at_utc"}
 
 EXPECTED_DOWNLOAD_FIELDS = {"status", "error", "attempts"}
 EXPECTED_WAYBACK_FIELDS = {
@@ -84,7 +84,7 @@ ALLOWED_ARCHIVE_STATUS = {"not_attempted", "success", "failed"}
 ALLOWED_HF_STATUS = {"not_attempted", "success", "failed"}
 ALLOWED_PDF_STATUS = {"not_attempted", "success", "failed", "missing_pdf"}
 
-PDF_NON_ATTEMPTED_ALLOWED_FIELDS = PDF_REQUIRED_FIELDS
+PDF_NON_ATTEMPTED_ALLOWED_FIELDS = PDF_REQUIRED_FIELDS | PDF_OPTIONAL_FIELDS
 PDF_EXTRACTED_FIELDS = {
     "file_size",
     "page_count",
@@ -335,6 +335,7 @@ def validate_timestamps(
     issues: list[Issue],
     file_path: Path,
     line_no: int,
+    require_updated: bool = True,
 ) -> None:
     created_at = parse_iso_timestamp(row.get("created_at_utc"))
     updated_at = parse_iso_timestamp(row.get("updated_at_utc"))
@@ -347,12 +348,21 @@ def validate_timestamps(
             file_path,
             line_no,
         )
-    if updated_at is None:
+    if require_updated and updated_at is None:
         add_issue(
             issues,
             "error",
             "updated_at_invalid",
             f"Invalid updated_at_utc={row.get('updated_at_utc')!r}",
+            file_path,
+            line_no,
+        )
+    if not require_updated and "updated_at_utc" in row and updated_at is None:
+        add_issue(
+            issues,
+            "warning",
+            "updated_at_invalid_optional",
+            f"Optional updated_at_utc is invalid: {row.get('updated_at_utc')!r}",
             file_path,
             line_no,
         )
@@ -877,7 +887,7 @@ def validate_pdf_row(
             file_path,
             line_no,
         )
-        validate_timestamps(row=row, issues=issues, file_path=file_path, line_no=line_no)
+        validate_timestamps(row=row, issues=issues, file_path=file_path, line_no=line_no, require_updated=False)
         return
 
     if status == "not_attempted":
@@ -891,7 +901,7 @@ def validate_pdf_row(
                 file_path,
                 line_no,
             )
-        validate_timestamps(row=row, issues=issues, file_path=file_path, line_no=line_no)
+        validate_timestamps(row=row, issues=issues, file_path=file_path, line_no=line_no, require_updated=False)
         return
 
     missing_non_attempted = sorted(PDF_NON_ATTEMPTED_REQUIRED_FIELDS - set(row.keys()))
@@ -994,7 +1004,7 @@ def validate_pdf_row(
                     line_no,
                 )
 
-    validate_timestamps(row=row, issues=issues, file_path=file_path, line_no=line_no)
+    validate_timestamps(row=row, issues=issues, file_path=file_path, line_no=line_no, require_updated=False)
 
 
 def validate_namespace_rows(

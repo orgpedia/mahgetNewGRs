@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from job_utils import detect_service_failure, filter_stage_records, load_code_filter, parse_state_list, print_stage_report
+from job_utils import JobRunResult, filter_stage_records, load_code_filter, parse_state_list, print_stage_report
 from info_store import InfoStore as LedgerStore
 from ledger_engine import RetryLimitExceededError
 from local_env import load_local_env
@@ -27,16 +27,21 @@ SAFE_IDENTIFIER_RE = re.compile(r"[^A-Za-z0-9._-]+")
 
 @dataclass(frozen=True)
 class ArchiveJobConfig:
-    ledger_dir: Path
     max_records: int
     lookback_days: int
-    dry_run: bool
-    service_failure_limit: int
     code_filter: set[str] = field(default_factory=set)
     allowed_states: set[str] = field(default_factory=lambda: set(DEFAULT_ALLOWED_STATES))
+    verbose: bool = False
+
+
+@dataclass(frozen=True)
+class ArchiveStageConfig:
+    dry_run: bool
+    service_failure_limit: int
     ia_access_key: str = ""
     ia_secret_key: str = ""
     metadata_only_fallback: bool = True
+    verbose: bool = False
 
 
 @dataclass
@@ -50,6 +55,19 @@ class ArchiveJobReport:
     service_failures: int = 0
     stopped_early: bool = False
     processed_codes: list[str] = field(default_factory=list)
+    success_codes: list[str] = field(default_factory=list)
+    failed_codes: list[str] = field(default_factory=list)
+    skipped_codes: list[str] = field(default_factory=list)
+
+
+def _verbose_job_log(config: ArchiveJobConfig, message: str) -> None:
+    if config.verbose:
+        print(f"[archive verbose] {message}")
+
+
+def _verbose_log(config: ArchiveStageConfig, message: str) -> None:
+    if config.verbose:
+        print(f"[archive verbose] {message}")
 
 
 def _safe_identifier(unique_code: str) -> str:
@@ -104,7 +122,7 @@ def _upload_pdf_to_archive(
     record: dict[str, Any],
     pdf_path: Path,
     identifier: str,
-    config: ArchiveJobConfig,
+    config: ArchiveStageConfig,
 ) -> tuple[bool, str, str, bool]:
     try:
         import internetarchive as ia  # type: ignore
@@ -137,10 +155,19 @@ def _upload_pdf_to_archive(
         return False, "", f"archive_upload_exception:{exc}", True
 
 
-def run_archive_job(config: ArchiveJobConfig) -> ArchiveJobReport:
-    store = LedgerStore(config.ledger_dir)
-    report = ArchiveJobReport()
+def _dedupe_keep_order(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    output: list[str] = []
+    for value in values:
+        code = str(value).strip()
+        if not code or code in seen:
+            continue
+        seen.add(code)
+        output.append(code)
+    return output
 
+
+def select_candidates(config: ArchiveJobConfig, store: LedgerStore) -> list[str]:
     candidates = filter_stage_records(
         store,
         allowed_states=config.allowed_states,
@@ -149,13 +176,50 @@ def run_archive_job(config: ArchiveJobConfig) -> ArchiveJobReport:
         max_attempts=2,
         lookback_days=config.lookback_days,
     )
-    report.selected = len(candidates)
     limit = config.max_records if config.max_records > 0 else len(candidates)
-    consecutive_service_failures = 0
+    selected_codes = [item.unique_code for item in candidates[:limit]]
+    _verbose_job_log(
+        config,
+        (
+            f"candidate_count={len(candidates)} selected={len(selected_codes)} "
+            f"max_records={config.max_records} lookback_days={config.lookback_days} "
+            f"code_filter_size={len(config.code_filter)} allowed_states={sorted(config.allowed_states)}"
+        ),
+    )
+    if config.verbose and selected_codes:
+        preview = selected_codes[:25]
+        print(f"[archive verbose] selected codes preview ({len(preview)}/{len(selected_codes)}):")
+        for code in preview:
+            print(f"[archive verbose]   {code}")
+    return selected_codes
 
-    for item in candidates[:limit]:
-        unique_code = item.unique_code
-        record = item.record
+
+def run_selected(
+    selected_codes: list[str],
+    stage_config: ArchiveStageConfig,
+    store: LedgerStore,
+) -> JobRunResult[ArchiveJobReport]:
+    codes = _dedupe_keep_order(selected_codes)
+    report = ArchiveJobReport(selected=len(codes))
+    consecutive_service_failures = 0
+    _verbose_log(
+        stage_config,
+        (
+            f"selected={report.selected} dry_run={stage_config.dry_run} "
+            f"service_failure_limit={stage_config.service_failure_limit} "
+            f"metadata_only_fallback={stage_config.metadata_only_fallback}"
+        ),
+    )
+
+    for index, unique_code in enumerate(codes, start=1):
+        _verbose_log(stage_config, f"[{index}/{len(codes)}] code={unique_code}")
+        record = store.find(unique_code)
+        if record is None:
+            report.skipped += 1
+            report.skipped_codes.append(unique_code)
+            _verbose_log(stage_config, f"[skip] code={unique_code} reason=missing_record")
+            continue
+
         report.processed += 1
         report.processed_codes.append(unique_code)
 
@@ -169,14 +233,20 @@ def run_archive_job(config: ArchiveJobConfig) -> ArchiveJobReport:
         download_status = str(download_obj.get("status") or "") if isinstance(download_obj, dict) else ""
         download_path = str(download_obj.get("path") or "") if isinstance(download_obj, dict) else ""
         has_document = download_status == "success" and bool(download_path)
+        _verbose_log(
+            stage_config,
+            f"[plan] code={unique_code} has_document={has_document} wayback_url={bool(wayback_url)} identifier={identifier}",
+        )
 
-        if config.dry_run:
+        if stage_config.dry_run:
             continue
 
         try:
             if not has_document:
-                if not config.metadata_only_fallback:
+                if not stage_config.metadata_only_fallback:
                     report.skipped += 1
+                    report.skipped_codes.append(unique_code)
+                    _verbose_log(stage_config, f"[skip] code={unique_code} reason=metadata_fallback_disabled")
                     continue
                 detail_url = str(archive_obj.get("url") or "").strip() if isinstance(archive_obj, dict) else ""
                 if not detail_url:
@@ -190,8 +260,10 @@ def run_archive_job(config: ArchiveJobConfig) -> ArchiveJobReport:
                     has_wayback_url=False,
                 )
                 report.success += 1
+                report.success_codes.append(unique_code)
                 report.metadata_fallback += 1
                 consecutive_service_failures = 0
+                _verbose_log(stage_config, f"[fallback success] code={unique_code} url={detail_url}")
                 continue
 
             pdf_path = Path(download_path)
@@ -205,14 +277,16 @@ def run_archive_job(config: ArchiveJobConfig) -> ArchiveJobReport:
                     error="missing_download_file",
                 )
                 report.failed += 1
+                report.failed_codes.append(unique_code)
                 consecutive_service_failures = 0
+                _verbose_log(stage_config, f"[failed] code={unique_code} reason=missing_download_file path={pdf_path}")
                 continue
 
             upload_ok, archive_url, error_text, service_failure = _upload_pdf_to_archive(
                 record=record,
                 pdf_path=pdf_path,
                 identifier=identifier,
-                config=config,
+                config=stage_config,
             )
             if upload_ok:
                 store.apply_stage_result(
@@ -224,7 +298,9 @@ def run_archive_job(config: ArchiveJobConfig) -> ArchiveJobReport:
                     has_wayback_url=has_wayback_url,
                 )
                 report.success += 1
+                report.success_codes.append(unique_code)
                 consecutive_service_failures = 0
+                _verbose_log(stage_config, f"[success] code={unique_code} url={archive_url}")
             else:
                 store.apply_stage_result(
                     unique_code=unique_code,
@@ -233,6 +309,14 @@ def run_archive_job(config: ArchiveJobConfig) -> ArchiveJobReport:
                     error=error_text or "archive_upload_failed",
                 )
                 report.failed += 1
+                report.failed_codes.append(unique_code)
+                _verbose_log(
+                    stage_config,
+                    (
+                        f"[failed] code={unique_code} error={error_text or 'archive_upload_failed'} "
+                        f"service_failure={service_failure}"
+                    ),
+                )
                 if service_failure:
                     report.service_failures += 1
                     consecutive_service_failures += 1
@@ -240,10 +324,14 @@ def run_archive_job(config: ArchiveJobConfig) -> ArchiveJobReport:
                     consecutive_service_failures = 0
         except RetryLimitExceededError:
             report.skipped += 1
+            report.skipped_codes.append(unique_code)
+            _verbose_log(stage_config, f"[skip] code={unique_code} reason=retry_limit_exceeded")
         except Exception as exc:
             report.failed += 1
+            report.failed_codes.append(unique_code)
             report.service_failures += 1
             consecutive_service_failures += 1
+            _verbose_log(stage_config, f"[exception] code={unique_code} error={exc}")
             try:
                 store.apply_stage_result(
                     unique_code=unique_code,
@@ -254,11 +342,26 @@ def run_archive_job(config: ArchiveJobConfig) -> ArchiveJobReport:
             except Exception:
                 pass
 
-        if consecutive_service_failures >= max(1, config.service_failure_limit):
+        if consecutive_service_failures >= max(1, stage_config.service_failure_limit):
             report.stopped_early = True
+            _verbose_log(
+                stage_config,
+                (
+                    "stopping_early reason=service_failure_limit "
+                    f"consecutive={consecutive_service_failures}/{stage_config.service_failure_limit}"
+                ),
+            )
             break
 
-    return report
+    if report.stopped_early:
+        return JobRunResult(
+            report=report,
+            fatal_error=(
+                "archive job stopped early after hitting consecutive service failure limit "
+                f"({stage_config.service_failure_limit})"
+            ),
+        )
+    return JobRunResult(report=report)
 
 
 def configure_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
@@ -288,6 +391,7 @@ def configure_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser
         help="Disable metadata-only fallback for download-failed records",
     )
     parser.add_argument("--dry-run", action="store_true", help="Plan records without uploading")
+    parser.add_argument("--verbose", action="store_true", help="Print detailed selection and per-record archive status")
     return parser
 
 
@@ -311,20 +415,28 @@ def run_from_args(args: argparse.Namespace) -> int:
     access_key = args.ia_access_key or os.environ.get("IA_ACCESS_KEY", "")
     secret_key = args.ia_secret_key or os.environ.get("IA_SECRET_KEY", "")
 
-    config = ArchiveJobConfig(
-        ledger_dir=Path(args.ledger_dir).resolve(),
+    store = LedgerStore(Path(args.ledger_dir).resolve())
+    job_config = ArchiveJobConfig(
         max_records=max(0, args.max_records),
         lookback_days=max(0, args.lookback_days),
-        dry_run=args.dry_run,
-        service_failure_limit=max(1, args.service_failure_limit),
         code_filter=code_filter,
         allowed_states=allowed_states,
+        verbose=args.verbose,
+    )
+    stage_config = ArchiveStageConfig(
+        dry_run=args.dry_run,
+        service_failure_limit=max(1, args.service_failure_limit),
         ia_access_key=access_key,
         ia_secret_key=secret_key,
         metadata_only_fallback=not args.no_metadata_fallback,
+        verbose=args.verbose,
     )
-    report = run_archive_job(config)
-    _print_report(report)
+    selected_codes = select_candidates(job_config, store)
+    result = run_selected(selected_codes, stage_config, store)
+    _print_report(result.report)
+    if result.fatal_error:
+        print(result.fatal_error)
+        return 1
     return 0
 
 

@@ -16,9 +16,9 @@ Main commands:
 - `append-ledger` - append-only incremental ingest from `mahgetGR` into existing ledger
 - `backfill-lfs-path` - one-time refresh of ledger `lfs_path` based on local PDF files
 - `job-download-pdf` - download stage for eligible records
-- `job-import-pdf` - import local PDF folders into `LFS/pdfs` + optional HF sync
+- `job-import-pdf` - upload already-downloaded PDFs (from ledger `download.path`) to HF
 - `job-pdf-info` - extract PDF metadata (pages/images/fonts/language/file size) into ledger `pdf_info`
-- `wrk-download-upload-pdfinfo` - one batch workflow: download PDFs -> upload those files to HF -> compute `pdf_info` for that batch
+- `wrk-download-upload-pdfinfo` - partition-wise workflow: process one year partition at a time, running batched download -> upload -> pdf_info
 - `validate-ledger` - validate schema/state/partition consistency
 - `update-readme-status` - refresh README status table from current ledger
 - `job-gr-site` - crawl reconciliation only (`daily|weekly|monthly`)
@@ -52,6 +52,7 @@ Environment variables used by stages:
 - HF sync defaults: `import/import_config.yaml` -> `hf` section (`dataset_repo_url`, `dataset_repo_id`, `dataset_repo_path`, `upload_large_folder_mode`, `upload_large_folder_threshold`)
 
 Most jobs support `--lookback-days N` to process only records within the last `N` days (relative to current UTC date). Use `0` to disable this filter.
+All jobs and workflows support `--verbose` for detailed selection/stage logs. The workflow also supports `--pdf-verbose` for extra pdf-info per-record logs.
 
 ## Hugging Face sync modes
 
@@ -83,23 +84,20 @@ Large upload behavior:
 
 All local CLI entrypoints auto-load `.env` (searching current directory upward) before argument parsing.
 
-## One-time PDF import
+## Selected PDF upload
 
-Use this when you already have downloaded PDFs in a local directory:
+Use this to upload PDFs already present at ledger `download.path`:
 
 ```bash
 python3 import/src/cli.py job-import-pdf \
-  --source-dir /path/to/existing/pdfs \
+  --ledger-dir import/grinfo \
   --hf-repo-path LFS/mahGRs
 ```
 
 Notes:
 
-- File names should contain a `unique_code` (16-22 digit token).
-- Destination path is `LFS/pdfs/<department_code>/<YYYY-MM>/<unique_code>.pdf`.
-- `department_code` and `gr_date` month are derived from ledger records.
-- Files without a matching ledger record are skipped.
-- `department_code` uses the shared abbreviation map in `import/src/department_codes.py` (for example, School Education -> `mahedu`).
+- Selection is ledger-driven and supports `--code`, `--codes-file`, `--lookback-days`, and `--max-records`.
+- Only records with `download.status=success` and an existing local `download.path` are upload candidates.
 
 ## `lfs_path` field
 
@@ -115,8 +113,14 @@ Notes:
 - Stored metadata includes:
   - `page_count`
   - `has_any_page_image` + `pages_with_images`
-  - `fonts` dictionary keyed by `font_num` with font metadata and `words` (used-word counts)
+  - `fonts` dictionary keyed by internal font id; each value keeps compact fields (`name`, `type`, `script_word_counts`, and `word_count` only when > 0)
   - `language` inferred from Unicode-script word counts
   - `file_size`
 - By default, records with existing `pdf_info.status=success` are skipped for speed. Use `--force` to recompute.
 - Use `--verbose` to print per-record processing details (skip reasons, extracted stats, and errors).
+
+One-time cleanup for existing `import/pdfinfos/*.jsonl`:
+
+```bash
+python3 import/src/onetime/prune_pdfinfo_fields.py --pdfinfos-dir import/pdfinfos
+```

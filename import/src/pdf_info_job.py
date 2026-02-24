@@ -11,8 +11,8 @@ from pathlib import Path
 from typing import Any
 
 from info_store import InfoStore as LedgerStore
-from job_utils import is_record_within_lookback
-from ledger_engine import partition_for_gr_date, to_ledger_relative_path
+from job_utils import JobRunResult, is_record_within_lookback, load_code_filter
+from ledger_engine import to_ledger_relative_path
 from local_env import load_local_env
 
 
@@ -41,15 +41,19 @@ class PdfInfoDependencyError(RuntimeError):
 
 
 @dataclass(frozen=True)
-class PdfInfoConfig:
-    ledger_dir: Path
+class PdfInfoJobConfig:
     max_records: int
     lookback_days: int
+    code_filter: set[str] = field(default_factory=set)
+    verbose: bool = False
+
+
+@dataclass(frozen=True)
+class PdfInfoStageConfig:
     dry_run: bool
     force: bool
     mark_missing: bool
     verbose: bool
-    code_filter: set[str] = field(default_factory=set)
 
 
 @dataclass
@@ -134,39 +138,20 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return default
 
 
-def _safe_optional_int(value: Any) -> int | None:
-    if value is None:
-        return None
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        return value
-    try:
-        return int(str(value))
-    except Exception:
-        return None
-
-
 def _parse_font_entry(raw_font: Any) -> dict[str, Any]:
     if not isinstance(raw_font, (tuple, list)):
         return {
             "font_num": -1,
-            "ext": "",
             "type": "",
             "basefont": "",
             "name": "",
-            "encoding": "",
-            "referencer": None,
         }
 
     return {
         "font_num": _safe_int(raw_font[0] if len(raw_font) > 0 else -1, -1),
-        "ext": str(raw_font[1] if len(raw_font) > 1 else ""),
         "type": str(raw_font[2] if len(raw_font) > 2 else ""),
         "basefont": str(raw_font[3] if len(raw_font) > 3 else ""),
         "name": str(raw_font[4] if len(raw_font) > 4 else ""),
-        "encoding": str(raw_font[5] if len(raw_font) > 5 else ""),
-        "referencer": _safe_optional_int(raw_font[6] if len(raw_font) > 6 else None),
     }
 
 
@@ -315,14 +300,8 @@ def extract_pdf_info(pdf_path: Path, fitz: Any) -> dict[str, Any]:
                 key = str(font_num)
                 if key not in fonts:
                     fonts[key] = {
-                        "font_num": font_num,
                         "name": font_entry.get("basefont") or font_entry.get("name") or "",
-                        "basefont": font_entry.get("basefont", ""),
-                        "resource_name": font_entry.get("name", ""),
                         "type": font_entry.get("type", ""),
-                        "ext": font_entry.get("ext", ""),
-                        "encoding": font_entry.get("encoding", ""),
-                        "referencer": font_entry.get("referencer"),
                         "words": 0,
                         "script_word_counts": {},
                     }
@@ -371,8 +350,16 @@ def extract_pdf_info(pdf_path: Path, fitz: Any) -> dict[str, Any]:
     sorted_fonts = {}
     for font_key in sorted(fonts.keys(), key=lambda value: int(value)):
         font_info = fonts[font_key]
-        font_info["script_word_counts"] = _sorted_count_dict(dict(font_info.get("script_word_counts", {})))
-        sorted_fonts[font_key] = font_info
+        word_count = int(font_info.get("words", 0) or 0)
+        if word_count <= 0:
+            continue
+        sorted_font_info: dict[str, Any] = {
+            "name": str(font_info.get("name") or ""),
+            "type": str(font_info.get("type") or ""),
+            "script_word_counts": _sorted_count_dict(dict(font_info.get("script_word_counts", {}))),
+            "word_count": word_count,
+        }
+        sorted_fonts[font_key] = sorted_font_info
 
     sorted_scripts = _sorted_count_dict(script_word_counts)
     return {
@@ -434,27 +421,86 @@ def _is_success_pdf_info(value: Any) -> bool:
     return str(value.get("status") or "").strip() == "success"
 
 
-def _verbose_log(config: PdfInfoConfig, message: str) -> None:
+def _verbose_log(config: PdfInfoStageConfig, message: str) -> None:
     if config.verbose:
         print(message)
 
 
-def _record_label(partition: str, unique_code: str) -> str:
+def _verbose_job_log(config: PdfInfoJobConfig, message: str) -> None:
+    if config.verbose:
+        print(message)
+
+
+def _record_label(unique_code: str) -> str:
     if unique_code:
-        return f"{partition}:{unique_code}"
-    return f"{partition}:<missing-unique_code>"
+        return unique_code
+    return "<missing-unique_code>"
 
 
-def run_pdf_info_stage(config: PdfInfoConfig) -> PdfInfoReport:
-    if not config.ledger_dir.exists() or not config.ledger_dir.is_dir():
-        raise FileNotFoundError(f"Ledger directory not found: {config.ledger_dir}")
+def _dedupe_keep_order(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    output: list[str] = []
+    for value in values:
+        code = str(value).strip()
+        if not code or code in seen:
+            continue
+        seen.add(code)
+        output.append(code)
+    return output
 
-    fitz = _load_fitz()
-    store = LedgerStore(config.ledger_dir)
+
+def select_candidates(config: PdfInfoJobConfig, store: LedgerStore) -> list[str]:
+    selected: list[str] = []
+    scanned = 0
+    for record in store.iter_records():
+        unique_code = str(record.get("unique_code") or "").strip()
+        if not unique_code:
+            continue
+        scanned += 1
+        if config.code_filter and unique_code not in config.code_filter:
+            continue
+        if not is_record_within_lookback(record, config.lookback_days):
+            continue
+        selected.append(unique_code)
+        if config.max_records > 0 and len(selected) >= config.max_records:
+            break
+    _verbose_job_log(
+        config,
+        (
+            f"[pdf-info verbose] scanned={scanned} selected={len(selected)} "
+            f"max_records={config.max_records} lookback_days={config.lookback_days} "
+            f"code_filter_size={len(config.code_filter)}"
+        ),
+    )
+    if config.verbose and selected:
+        preview = selected[:25]
+        print(f"[pdf-info verbose] selected codes preview ({len(preview)}/{len(selected)}):")
+        for code in preview:
+            print(f"[pdf-info verbose]   {code}")
+    return selected
+
+
+def run_selected(
+    selected_codes: list[str],
+    stage_config: PdfInfoStageConfig,
+    store: LedgerStore,
+) -> JobRunResult[PdfInfoReport]:
+    try:
+        fitz = _load_fitz()
+    except PdfInfoDependencyError as exc:
+        return JobRunResult(report=PdfInfoReport(), fatal_error=str(exc))
+
     report = PdfInfoReport()
-    max_records = max(0, config.max_records)
     changed_partitions: set[str] = set()
     pending_updates: list[dict[str, Any]] = []
+    codes = _dedupe_keep_order(selected_codes)
+    _verbose_log(
+        stage_config,
+        (
+            f"[pdf-info verbose] selected={len(codes)} dry_run={stage_config.dry_run} "
+            f"force={stage_config.force} mark_missing={stage_config.mark_missing}"
+        ),
+    )
 
     def _flush_pending_updates() -> None:
         nonlocal pending_updates
@@ -465,45 +511,31 @@ def run_pdf_info_stage(config: PdfInfoConfig) -> PdfInfoReport:
             changed_partitions.add(result.partition)
         pending_updates = []
 
-    for record in store.iter_records():
-        unique_code = str(record.get("unique_code") or "").strip()
-        partition = partition_for_gr_date(record.get("gr_date"))
-        label = _record_label(partition, unique_code)
+    for unique_code in codes:
+        record = store.find(unique_code)
         report.scanned_records += 1
+        label = _record_label(unique_code)
 
-        if max_records > 0 and report.processed_records >= max_records:
-            _verbose_log(config, f"[skip limit] {label}")
-            continue
-
-        if not unique_code:
-            _verbose_log(config, f"[skip invalid] {label}")
-            continue
-
-        if not is_record_within_lookback(record, config.lookback_days):
-            report.skipped_lookback += 1
-            _verbose_log(config, f"[skip lookback] {label}")
-            continue
-
-        if config.code_filter and unique_code not in config.code_filter:
-            _verbose_log(config, f"[skip filter] {label}")
+        if record is None:
+            _verbose_log(stage_config, f"[skip missing] {label}")
             continue
 
         current_pdf_info = record.get("pdf_info")
-        if not config.force and _is_success_pdf_info(current_pdf_info):
+        if not stage_config.force and _is_success_pdf_info(current_pdf_info):
             report.skipped_already_success += 1
-            _verbose_log(config, f"[skip success] {label}")
+            _verbose_log(stage_config, f"[skip success] {label}")
             continue
 
         pdf_path = _resolve_pdf_path(record)
         if pdf_path is None:
             report.skipped_no_local_pdf += 1
-            if not config.mark_missing:
-                _verbose_log(config, f"[skip no-pdf] {label}")
+            if not stage_config.mark_missing:
+                _verbose_log(stage_config, f"[skip no-pdf] {label}")
                 continue
-            _verbose_log(config, f"[mark missing] {label}")
+            _verbose_log(stage_config, f"[mark missing] {label}")
             next_pdf_info = _build_missing_info()
         else:
-            _verbose_log(config, f"[process] {label} path={to_ledger_relative_path(pdf_path)}")
+            _verbose_log(stage_config, f"[process] {label} path={to_ledger_relative_path(pdf_path)}")
             try:
                 next_pdf_info = extract_pdf_info(pdf_path=pdf_path, fitz=fitz)
                 language = next_pdf_info.get("language", {})
@@ -511,7 +543,7 @@ def run_pdf_info_stage(config: PdfInfoConfig) -> PdfInfoReport:
                 if isinstance(language, dict):
                     inferred = str(language.get("inferred") or "")
                 _verbose_log(
-                    config,
+                    stage_config,
                     (
                         f"[extracted] {label} pages={next_pdf_info.get('page_count')} "
                         f"images={next_pdf_info.get('pages_with_images')} "
@@ -522,30 +554,30 @@ def run_pdf_info_stage(config: PdfInfoConfig) -> PdfInfoReport:
                 )
             except Exception as exc:
                 report.extraction_failed += 1
-                _verbose_log(config, f"[failed] {label} error={exc}")
+                _verbose_log(stage_config, f"[failed] {label} error={exc}")
                 next_pdf_info = _build_failed_info(str(exc))
 
         report.processed_records += 1
         if current_pdf_info == next_pdf_info:
             report.unchanged_records += 1
-            _verbose_log(config, f"[unchanged] {label}")
+            _verbose_log(stage_config, f"[unchanged] {label}")
             continue
 
         report.updated_records += 1
-        if config.dry_run:
-            _verbose_log(config, f"[dry-run update] {label}")
+        if stage_config.dry_run:
+            _verbose_log(stage_config, f"[dry-run update] {label}")
             continue
 
         pending_updates.append({"unique_code": unique_code, "pdf_info": next_pdf_info})
         if len(pending_updates) >= PDF_INFO_UPDATE_BATCH_SIZE:
             _flush_pending_updates()
-        _verbose_log(config, f"[updated] {label}")
+        _verbose_log(stage_config, f"[updated] {label}")
 
-    if not config.dry_run:
+    if not stage_config.dry_run:
         _flush_pending_updates()
         report.partitions_changed = len(changed_partitions)
 
-    return report
+    return JobRunResult(report=report)
 
 
 def print_pdf_info_stage_report(report: PdfInfoReport, *, dry_run: bool) -> None:
@@ -568,6 +600,8 @@ def configure_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser
         "Includes page count, image presence, used-font word counts, language inference, and file size."
     )
     parser.add_argument("--ledger-dir", default="import/grinfo", help="Ledger root directory (supports split ledgers)")
+    parser.add_argument("--codes-file", default="", help="Optional file containing unique codes to process")
+    parser.add_argument("--code", action="append", default=[], help="Explicit unique_code values to process")
     parser.add_argument(
         "--max-records",
         type=int,
@@ -592,22 +626,27 @@ def configure_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser
 
 
 def run_from_args(args: argparse.Namespace) -> int:
-    config = PdfInfoConfig(
-        ledger_dir=Path(args.ledger_dir).resolve(),
+    code_filter = load_code_filter(args.code, args.codes_file or None)
+    store = LedgerStore(Path(args.ledger_dir).resolve())
+    job_config = PdfInfoJobConfig(
         max_records=max(0, args.max_records),
         lookback_days=max(0, args.lookback_days),
+        code_filter=code_filter,
+        verbose=args.verbose,
+    )
+    stage_config = PdfInfoStageConfig(
         dry_run=args.dry_run,
         force=args.force,
         mark_missing=args.mark_missing,
         verbose=args.verbose,
     )
-    try:
-        report = run_pdf_info_stage(config)
-    except PdfInfoDependencyError as exc:
-        print(f"pdf-info error: {exc}")
+    selected_codes = select_candidates(job_config, store)
+    result = run_selected(selected_codes, stage_config, store)
+    if result.fatal_error:
+        print(f"pdf-info error: {result.fatal_error}")
         return 2
 
-    print_pdf_info_stage_report(report, dry_run=config.dry_run)
+    print_pdf_info_stage_report(result.report, dry_run=stage_config.dry_run)
     return 0
 
 

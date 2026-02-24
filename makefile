@@ -6,7 +6,10 @@ HF_REPO_PATH_DEFAULT := $(shell python3 -c "import sys; sys.path.insert(0, 'impo
 LEDGER_DIR ?= import/grinfo
 SOURCE_DIR ?= import/websites/gr.maharashtra.gov.in
 HF_REPO_PATH ?= $(HF_REPO_PATH_DEFAULT)
-IMPORT_DIR ?=
+WRK_MAX_RUNTIME_MINUTES ?= 10
+VERBOSE ?= 0
+
+VERBOSE_FLAG := $(if $(filter 1 true TRUE yes YES y Y on ON,$(VERBOSE)),--verbose,)
 
 ifeq ($(strip $(HF_REPO_PATH)),)
 HF_REPO_PATH := LFS/mahGRs
@@ -17,15 +20,19 @@ endif
 help:
 	@echo "Usage: make <target>"
 	@echo ""
+	@echo "Options:"
+	@echo "  VERBOSE=1       Pass --verbose to job/workflow targets"
+	@echo "  WRK_MAX_RUNTIME_MINUTES=<N>  Workflow max runtime in minutes (default: 60)"
+	@echo ""
 	@echo "Targets:"
 	@echo "  baseline-ledger  Build baseline ledger from mahgetGR + mahgetAllGR"
 	@echo "  migrate-infos    Split import/grinfo into urlinfos/uploadinfos/pdfinfos"
 	@echo "  append-ledger    Append only new records from mahgetGR into ledger"
 	@echo "  backfill-lfs-path Backfill ledger lfs_path from local LFS PDFs"
 	@echo "  job-download-pdf Run download-pdf stage job"
-	@echo "  job-import-pdf   Import local PDFs into LFS/pdfs and optionally sync HF"
+	@echo "  job-import-pdf   Upload downloaded PDFs referenced by ledger to HF"
 	@echo "  job-pdf-info     Extract PDF metadata into ledger pdf_info"
-	@echo "  wrk-download-upload-pdfinfo Run one batch: download -> upload -> pdf-info"
+	@echo "  wrk-download-upload-pdfinfo Run partition-wise batches: download -> upload -> pdf-info (default max runtime: 60 min)"
 	@echo "  validate         Validate yearly JSONL ledgers"
 	@echo "  status-readme    Refresh README status table from ledger"
 	@echo "  job-gr-site      Run gr-site job (set MODE=daily|weekly|monthly)"
@@ -49,7 +56,7 @@ backfill-lfs-path:
 	$(CLI) update-readme-status --ledger-dir $(LEDGER_DIR) --readme-path README.md
 
 job-pdf-info:
-	$(CLI) job-pdf-info --ledger-dir $(LEDGER_DIR)
+	$(CLI) job-pdf-info --ledger-dir $(LEDGER_DIR) $(VERBOSE_FLAG)
 	$(CLI) update-readme-status --ledger-dir $(LEDGER_DIR) --readme-path README.md
 
 validate:
@@ -59,32 +66,28 @@ status-readme:
 	$(CLI) update-readme-status --ledger-dir $(LEDGER_DIR) --readme-path README.md
 
 job-import-pdf:
-	@if [ -z "$(IMPORT_DIR)" ] || [ -z "$(HF_REPO_PATH)" ]; then \
-		echo "Usage: make job-import-pdf IMPORT_DIR=/path/to/pdfs HF_REPO_PATH=/path/to/local/lfs-data-root"; \
-		exit 2; \
-	fi
-	$(CLI) job-import-pdf --source-dir "$(IMPORT_DIR)" --ledger-dir $(LEDGER_DIR) --hf-repo-path "$(HF_REPO_PATH)"
+	$(CLI) job-import-pdf --ledger-dir $(LEDGER_DIR) --hf-repo-path "$(HF_REPO_PATH)" $(VERBOSE_FLAG)
 	$(CLI) update-readme-status --ledger-dir $(LEDGER_DIR) --readme-path README.md
 
 MODE ?= daily
 job-gr-site:
-	$(CLI) job-gr-site --mode $(MODE) --ledger-dir $(LEDGER_DIR) --source-dir $(SOURCE_DIR)
+	$(CLI) job-gr-site --mode $(MODE) --ledger-dir $(LEDGER_DIR) --source-dir $(SOURCE_DIR) $(VERBOSE_FLAG)
 	$(CLI) update-readme-status --ledger-dir $(LEDGER_DIR) --readme-path README.md
 
 job-wayback:
-	$(CLI) job-wayback --ledger-dir $(LEDGER_DIR)
+	$(CLI) job-wayback --ledger-dir $(LEDGER_DIR) $(VERBOSE_FLAG)
 	$(CLI) update-readme-status --ledger-dir $(LEDGER_DIR) --readme-path README.md
 
 job-archive:
-	$(CLI) job-archive --ledger-dir $(LEDGER_DIR)
+	$(CLI) job-archive --ledger-dir $(LEDGER_DIR) $(VERBOSE_FLAG)
 	$(CLI) update-readme-status --ledger-dir $(LEDGER_DIR) --readme-path README.md
 
 job-download-pdf:
-	$(CLI) job-download-pdf --ledger-dir $(LEDGER_DIR)
+	$(CLI) job-download-pdf --ledger-dir $(LEDGER_DIR) $(VERBOSE_FLAG)
 	$(CLI) update-readme-status --ledger-dir $(LEDGER_DIR) --readme-path README.md
 
 wrk-download-upload-pdfinfo:
-	$(CLI) wrk-download-upload-pdfinfo --ledger-dir $(LEDGER_DIR) --hf-repo-path "$(HF_REPO_PATH)"
+	$(CLI) wrk-download-upload-pdfinfo --ledger-dir $(LEDGER_DIR) --hf-repo-path "$(HF_REPO_PATH)" --max-runtime-minutes $(WRK_MAX_RUNTIME_MINUTES) $(VERBOSE_FLAG)
 	$(CLI) update-readme-status --ledger-dir $(LEDGER_DIR) --readme-path README.md
 
 sync-hf:

@@ -26,6 +26,7 @@ ALLOWED_DOWNLOAD_STATUS = {"not_attempted", "attempted", "success", "failed"}
 ALLOWED_WAYBACK_STATUS = {"not_attempted", "success", "failed"}
 ALLOWED_ARCHIVE_STATUS = {"not_attempted", "success", "failed"}
 ALLOWED_PDF_STATUS = {"not_attempted", "success", "failed", "missing_pdf"}
+DROP_PDF_FONT_FIELDS = {"basefont", "encoding", "ext", "font_num", "referencer", "resource_name"}
 
 
 class MigrationError(Exception):
@@ -174,6 +175,37 @@ def _source_timestamp(row: dict[str, Any], key: str, fallback: str) -> str:
     return _non_empty_text(row.get(key), fallback)
 
 
+def _normalized_font_word_count(font_obj: dict[str, Any]) -> int | None:
+    value = font_obj.get("word_count")
+    if value is None and "words" in font_obj:
+        value = font_obj.get("words")
+    parsed = _int_or_none(value)
+    if parsed is None or parsed <= 0:
+        return None
+    return parsed
+
+
+def _normalize_pdf_fonts(fonts_obj: Any) -> dict[str, dict[str, Any]] | None:
+    if not isinstance(fonts_obj, dict):
+        return None
+
+    normalized: dict[str, dict[str, Any]] = {}
+    for font_key, font_value in fonts_obj.items():
+        if not isinstance(font_value, dict):
+            continue
+        out_font: dict[str, Any] = {}
+        for key, value in font_value.items():
+            if key in DROP_PDF_FONT_FIELDS or key in {"words", "word_count"}:
+                continue
+            out_font[key] = value
+        word_count = _normalized_font_word_count(font_value)
+        if word_count is not None:
+            out_font["word_count"] = word_count
+        normalized[str(font_key)] = out_font
+
+    return normalized
+
+
 def _ascii_slug(value: str) -> str:
     text = unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode("ascii")
     text = SAFE_TEXT_RE.sub("_", text).strip("_")
@@ -309,13 +341,11 @@ def _build_uploadinfo_row(row: dict[str, Any], record_key: str, now_text: str) -
 
 def _build_pdfinfo_row(row: dict[str, Any], record_key: str, now_text: str) -> dict[str, Any]:
     created_at = _source_timestamp(row, "created_at_utc", now_text)
-    updated_at = _source_timestamp(row, "updated_at_utc", created_at)
 
     base: dict[str, Any] = {
         "record_key": record_key,
         "status": "not_attempted",
         "created_at_utc": created_at,
-        "updated_at_utc": updated_at,
     }
 
     pdf_src = row.get("pdf_info")
@@ -346,7 +376,7 @@ def _build_pdfinfo_row(row: dict[str, Any], record_key: str, now_text: str) -> d
     out["pages_with_images"] = _int_or_none(pdf_src.get("pages_with_images"))
     out["has_any_page_image"] = _bool_or_none(pdf_src.get("has_any_page_image"))
     out["font_count"] = _int_or_none(pdf_src.get("font_count"))
-    out["fonts"] = pdf_src.get("fonts") if isinstance(pdf_src.get("fonts"), dict) else None
+    out["fonts"] = _normalize_pdf_fonts(pdf_src.get("fonts"))
     out["unresolved_word_count"] = _int_or_none(pdf_src.get("unresolved_word_count"))
     out["language"] = pdf_src.get("language") if isinstance(pdf_src.get("language"), dict) else None
     return out
