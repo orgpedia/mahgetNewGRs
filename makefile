@@ -6,7 +6,7 @@ HF_REPO_PATH_DEFAULT := $(shell python3 -c "import sys; sys.path.insert(0, 'impo
 LEDGER_DIR ?= import/grinfo
 SOURCE_DIR ?= import/websites/gr.maharashtra.gov.in
 HF_REPO_PATH ?= $(HF_REPO_PATH_DEFAULT)
-WRK_MAX_RUNTIME_MINUTES ?= 10
+WRK_MAX_RUNTIME_MINUTES ?= 300
 VERBOSE ?= 0
 
 VERBOSE_FLAG := $(if $(filter 1 true TRUE yes YES y Y on ON,$(VERBOSE)),--verbose,)
