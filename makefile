@@ -6,7 +6,7 @@ HF_REPO_PATH_DEFAULT := $(shell python3 -c "import sys; sys.path.insert(0, 'impo
 LEDGER_DIR ?= import/grinfo
 SOURCE_DIR ?= import/websites/gr.maharashtra.gov.in
 HF_REPO_PATH ?= $(HF_REPO_PATH_DEFAULT)
-WRK_MAX_RUNTIME_MINUTES ?= 300
+WRK_MAX_RUNTIME_MINUTES ?= 315
 VERBOSE ?= 0
 
 VERBOSE_FLAG := $(if $(filter 1 true TRUE yes YES y Y on ON,$(VERBOSE)),--verbose,)
@@ -87,7 +87,7 @@ job-download-pdf:
 	$(CLI) update-readme-status --ledger-dir $(LEDGER_DIR) --readme-path README.md
 
 wrk-download-upload-pdfinfo:
-	$(CLI) wrk-download-upload-pdfinfo --ledger-dir $(LEDGER_DIR) --hf-repo-path "$(HF_REPO_PATH)" --max-runtime-minutes $(WRK_MAX_RUNTIME_MINUTES) $(VERBOSE_FLAG)
+	$(CLI) wrk-download-upload-pdfinfo --ledger-dir $(LEDGER_DIR) --hf-repo-path "$(HF_REPO_PATH)" --max-runtime-minutes $(WRK_MAX_RUNTIME_MINUTES) --large-folder-mode always --no-large-folder-report $(VERBOSE_FLAG)
 	$(CLI) update-readme-status --ledger-dir $(LEDGER_DIR) --readme-path README.md
 
 sync-hf:

@@ -11,7 +11,16 @@ from import_config import load_import_config
 from info_store import InfoStore as LedgerStore
 from job_utils import JobRunResult, is_record_within_lookback, load_code_filter, print_stage_report
 from local_env import load_local_env
-from sync_hf_job import SyncHFConfig, SyncHFError, resolve_hf_repo_id, resolve_hf_repo_path, run_sync_hf
+from sync_hf_job import (
+    LARGE_FOLDER_MODE_ALWAYS,
+    LARGE_FOLDER_MODE_AUTO,
+    LARGE_FOLDER_MODE_NEVER,
+    SyncHFConfig,
+    SyncHFError,
+    resolve_hf_repo_id,
+    resolve_hf_repo_path,
+    run_sync_hf,
+)
 
 
 @dataclass(frozen=True)
@@ -33,6 +42,8 @@ class ImportPdfStageConfig:
     hf_commit_message: str
     hf_no_verify_storage: bool
     hf_skip_push: bool
+    hf_large_folder_mode: str
+    hf_large_folder_print_report: bool
     verbose: bool = False
 
 
@@ -227,6 +238,8 @@ def run_selected(
             hf_repo_id=stage_config.hf_repo_id,
             mode="upload",
             file_paths=relative_paths,
+            large_folder_mode=stage_config.hf_large_folder_mode,
+            large_folder_print_report=stage_config.hf_large_folder_print_report,
         )
         run_sync_hf(sync_config)
         report.uploaded_files = len(relative_paths)
@@ -299,6 +312,17 @@ def configure_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser
     )
     parser.add_argument("--hf-no-verify-storage", action="store_true", help="Skip post-upload verification checks")
     parser.add_argument("--hf-skip-push", action="store_true", help="Skip remote upload during HF step")
+    parser.add_argument(
+        "--large-folder-mode",
+        choices=(LARGE_FOLDER_MODE_AUTO, LARGE_FOLDER_MODE_ALWAYS, LARGE_FOLDER_MODE_NEVER),
+        default=hf_defaults.upload_large_folder_mode or LARGE_FOLDER_MODE_AUTO,
+        help="Large-folder strategy for HF upload: auto (default), always, never.",
+    )
+    parser.add_argument(
+        "--no-large-folder-report",
+        action="store_true",
+        help="Disable upload_large_folder progress/status report output.",
+    )
     return parser
 
 
@@ -329,6 +353,8 @@ def run_from_args(args: argparse.Namespace) -> int:
         hf_commit_message=args.hf_commit_message,
         hf_no_verify_storage=args.hf_no_verify_storage,
         hf_skip_push=args.hf_skip_push,
+        hf_large_folder_mode=args.large_folder_mode,
+        hf_large_folder_print_report=not args.no_large_folder_report,
         verbose=args.verbose,
     )
     selected_codes = select_candidates(job_config, store)

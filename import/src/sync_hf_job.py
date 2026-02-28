@@ -6,6 +6,7 @@ import argparse
 import os
 import re
 import shutil
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -15,10 +16,15 @@ from local_env import load_local_env
 
 try:
     from huggingface_hub import CommitOperationAdd, HfApi, hf_hub_download
+    try:
+        from huggingface_hub.utils import disable_progress_bars
+    except Exception:
+        disable_progress_bars = None
 except Exception:
     CommitOperationAdd = None
     HfApi = None
     hf_hub_download = None
+    disable_progress_bars = None
 
 
 class SyncHFError(Exception):
@@ -38,6 +44,7 @@ VALID_LARGE_FOLDER_MODES = {
 }
 DEFAULT_LARGE_FOLDER_THRESHOLD = 100
 HF_REPO_PATH_PLACEHOLDER = "/absolute/path/to/local/hf-dataset-clone"
+HF_DATASETS_DISABLE_PROGRESS_BARS_ENV = "HF_DATASETS_DISABLE_PROGRESS_BARS"
 LEDGER_NAMES = ("urlinfos", "uploadinfos", "pdfinfos", "grinfo")
 LEDGER_EXCLUDE_PATTERNS = tuple(
     [f"import/{name}/**" for name in LEDGER_NAMES]
@@ -70,6 +77,7 @@ class SyncHFConfig:
     large_folder_mode: str = LARGE_FOLDER_MODE_AUTO
     large_folder_threshold: int = DEFAULT_LARGE_FOLDER_THRESHOLD
     large_folder_num_workers: int | None = None
+    large_folder_print_report: bool = True
 
 
 def _require_hf_hub() -> None:
@@ -168,6 +176,19 @@ def _env_int(name: str, default: int) -> int:
         return int(raw)
     except ValueError:
         return default
+
+
+@contextmanager
+def _temporary_env_value(name: str, value: str):
+    previous = os.environ.get(name)
+    os.environ[name] = value
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = previous
 
 
 def _count_files(path: Path) -> int:
@@ -372,12 +393,14 @@ def _should_use_large_folder(
     *,
     config: SyncHFConfig,
     api: Any,
-    has_directory_target: bool,
     total_files: int,
 ) -> bool:
     mode = _normalize_large_folder_mode(config.large_folder_mode)
 
     if mode == LARGE_FOLDER_MODE_NEVER:
+        return False
+
+    if total_files < 1:
         return False
 
     if mode == LARGE_FOLDER_MODE_ALWAYS:
@@ -386,12 +409,8 @@ def _should_use_large_folder(
                 "`upload_large_folder` is not available in this `huggingface_hub` version. "
                 "Upgrade `huggingface_hub` or use `--large-folder-mode never`."
             )
-        if not has_directory_target:
-            return False
         return True
 
-    if not has_directory_target:
-        return False
     if total_files < max(config.large_folder_threshold, 1):
         return False
     return _supports_upload_large_folder(api)
@@ -407,6 +426,7 @@ def _upload_large_folder(
     include_ledger: bool,
     dry_run: bool,
     num_workers: int | None,
+    print_report: bool,
 ) -> None:
     if dry_run:
         print(
@@ -421,13 +441,23 @@ def _upload_large_folder(
         "repo_type": "dataset",
         "allow_patterns": allow_patterns,
         "ignore_patterns": None if include_ledger else list(LEDGER_EXCLUDE_PATTERNS),
-        "print_report": True,
+        "print_report": bool(print_report),
     }
     if revision:
         kwargs["revision"] = revision
     if num_workers is not None:
         kwargs["num_workers"] = num_workers
-    api.upload_large_folder(**kwargs)
+    if print_report:
+        api.upload_large_folder(**kwargs)
+        return
+    print("disabling progress bars")
+    if callable(disable_progress_bars):
+        try:
+            disable_progress_bars()
+        except Exception:
+            pass
+    with _temporary_env_value(HF_DATASETS_DISABLE_PROGRESS_BARS_ENV, "1"):
+        api.upload_large_folder(**kwargs)
 
 
 def _verify_remote_targets(
@@ -514,12 +544,10 @@ def _run_upload(config: SyncHFConfig) -> tuple[str, int]:
 
     uploaded_files = 0
     uploaded_targets: list[tuple[str, bool]] = []
-    has_directory_target = any(local_path.is_dir() for local_path, _ in targets)
     estimated_files = sum(_count_files(local_path) for local_path, _ in targets)
     use_large_folder = _should_use_large_folder(
         config=config,
         api=api,
-        has_directory_target=has_directory_target,
         total_files=estimated_files,
     )
 
@@ -536,6 +564,7 @@ def _run_upload(config: SyncHFConfig) -> tuple[str, int]:
             include_ledger=config.include_ledger,
             dry_run=config.dry_run,
             num_workers=config.large_folder_num_workers,
+            print_report=config.large_folder_print_report,
         )
         uploaded_files = estimated_files
         for local_path, path_in_repo in targets:
@@ -746,6 +775,11 @@ def configure_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser
         default=_env_int("HF_UPLOAD_LARGE_FOLDER_NUM_WORKERS", 0),
         help="Optional worker count for upload_large_folder (0 means library default).",
     )
+    parser.add_argument(
+        "--no-large-folder-report",
+        action="store_true",
+        help="Disable upload_large_folder progress/status report output.",
+    )
     parser.add_argument("--skip-push", action="store_true", help="Upload mode only: skip upload operation")
     parser.add_argument("--no-verify-storage", action="store_true", help="Skip post-operation verification checks")
     parser.add_argument("--dry-run", action="store_true", help="Print operations without uploading/downloading")
@@ -807,6 +841,7 @@ def run_from_args(args: argparse.Namespace) -> int:
         large_folder_mode=args.large_folder_mode,
         large_folder_threshold=max(args.large_folder_threshold, 1),
         large_folder_num_workers=args.large_folder_num_workers if args.large_folder_num_workers > 0 else None,
+        large_folder_print_report=not args.no_large_folder_report,
     )
     try:
         run_sync_hf(config)

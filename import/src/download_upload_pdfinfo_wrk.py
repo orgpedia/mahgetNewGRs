@@ -43,6 +43,8 @@ class DownloadUploadPdfInfoWorkflowConfig:
     hf_commit_message: str = "workflow: upload downloaded PDFs"
     hf_no_verify_storage: bool = False
     hf_skip_push: bool = False
+    hf_large_folder_mode: str = sync_hf_job.LARGE_FOLDER_MODE_AUTO
+    hf_large_folder_print_report: bool = True
     pdf_force: bool = False
     pdf_mark_missing: bool = False
     pdf_verbose: bool = False
@@ -109,6 +111,8 @@ def run_workflow(config: DownloadUploadPdfInfoWorkflowConfig) -> tuple[int, Down
     _verbose_log(config, f"lfs_root={config.lfs_root}")
     _verbose_log(config, f"hf_repo_path={config.hf_repo_path}")
     _verbose_log(config, f"hf_repo_id={config.hf_repo_id}")
+    _verbose_log(config, f"hf_large_folder_mode={config.hf_large_folder_mode}")
+    _verbose_log(config, f"hf_large_folder_print_report={config.hf_large_folder_print_report}")
     _verbose_log(config, f"dry_run={config.dry_run} skip_upload={config.skip_upload}")
     _verbose_log(config, f"max_runtime_seconds={max_runtime_seconds}")
     _verbose_log(config, f"lookback_days={config.lookback_days}")
@@ -237,6 +241,8 @@ def run_workflow(config: DownloadUploadPdfInfoWorkflowConfig) -> tuple[int, Down
                     hf_commit_message=config.hf_commit_message,
                     hf_no_verify_storage=config.hf_no_verify_storage,
                     hf_skip_push=config.hf_skip_push,
+                    hf_large_folder_mode=config.hf_large_folder_mode,
+                    hf_large_folder_print_report=config.hf_large_folder_print_report,
                     verbose=config.verbose,
                 )
                 import_result = import_pdf_job.run_selected(success_codes, import_stage_config, store)
@@ -349,6 +355,21 @@ def configure_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser
     )
     parser.add_argument("--hf-no-verify-storage", action="store_true", help="Skip post-upload verification checks")
     parser.add_argument("--hf-skip-push", action="store_true", help="Skip remote upload during HF step")
+    parser.add_argument(
+        "--large-folder-mode",
+        choices=(
+            sync_hf_job.LARGE_FOLDER_MODE_AUTO,
+            sync_hf_job.LARGE_FOLDER_MODE_ALWAYS,
+            sync_hf_job.LARGE_FOLDER_MODE_NEVER,
+        ),
+        default=hf_defaults.upload_large_folder_mode or sync_hf_job.LARGE_FOLDER_MODE_AUTO,
+        help="Large-folder strategy for HF upload: auto (default), always, never.",
+    )
+    parser.add_argument(
+        "--no-large-folder-report",
+        action="store_true",
+        help="Disable upload_large_folder progress/status report output.",
+    )
 
     parser.add_argument("--pdf-force", action="store_true", help="Recompute pdf_info even when status is already success")
     parser.add_argument("--pdf-mark-missing", action="store_true", help="Mark pdf_info as missing_pdf when local file is absent")
@@ -390,6 +411,8 @@ def run_from_args(args: argparse.Namespace) -> int:
         hf_commit_message=args.hf_commit_message,
         hf_no_verify_storage=args.hf_no_verify_storage,
         hf_skip_push=args.hf_skip_push,
+        hf_large_folder_mode=args.large_folder_mode,
+        hf_large_folder_print_report=not args.no_large_folder_report,
         pdf_force=args.pdf_force,
         pdf_mark_missing=args.pdf_mark_missing,
         pdf_verbose=args.pdf_verbose,

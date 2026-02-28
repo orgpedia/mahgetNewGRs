@@ -6,6 +6,6 @@ attempt_thresholds:
 hf:
   dataset_repo_url: https://huggingface.co/datasets/Orgpedia/mahGRs
   dataset_repo_id: Orgpedia/mahGRs
-  dataset_repo_path: LFS/mahGRs
+  dataset_repo_path: import/downloads
   upload_large_folder_mode: auto
   upload_large_folder_threshold: 100
