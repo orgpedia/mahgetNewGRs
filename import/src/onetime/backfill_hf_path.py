@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,14 +14,23 @@ from import_config import load_import_config
 from info_store import InfoStore
 from local_env import load_local_env
 
+try:
+    from huggingface_hub import HfApi
+except Exception:
+    HfApi = None
+
 
 LONG_DIGITS_RE = re.compile(r"\d{16,22}")
+HF_REPO_URL_PATTERN = re.compile(
+    r"(?:https?://)?(?:www\.)?huggingface\.co/datasets/([^/?#]+/[^/?#]+)"
+)
 
 
 @dataclass(frozen=True)
 class BackfillHFPathConfig:
     ledger_dir: Path
-    hf_repo_path: Path
+    hf_repo_id: str
+    hf_token: str
     dry_run: bool
     batch_size: int
     verbose: bool
@@ -44,14 +54,20 @@ def configure_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser
     hf_defaults = load_import_config().hf
 
     parser.description = (
-        "One-time backfill: set uploadinfos[].hf.path from local HF repo PDFs for rows where hf.path is missing."
+        "One-time backfill: set uploadinfos[].hf.path from remote HF dataset PDFs for rows where hf.path is missing."
     )
     parser.add_argument("--ledger-dir", default="import/grinfo", help="Ledger root directory (supports split ledgers)")
     parser.add_argument(
-        "--hf-repo-path",
-        default=hf_defaults.dataset_repo_path,
-        help="Local HF dataset repo path (default from import/import_config.yaml).",
+        "--hf-repo-id",
+        default=hf_defaults.dataset_repo_id,
+        help="HF dataset repo id (`namespace/name`; default from import/import_config.yaml).",
     )
+    parser.add_argument(
+        "--hf-repo-url",
+        default=hf_defaults.dataset_repo_url,
+        help="HF dataset URL used to infer repo id when --hf-repo-id is empty.",
+    )
+    parser.add_argument("--hf-token", default=os.environ.get("HF_TOKEN", ""), help="HF token override")
     parser.add_argument("--batch-size", type=int, default=1000, help="Number of updates per write batch")
     parser.add_argument("--dry-run", action="store_true", help="Only report planned updates")
     parser.add_argument("--verbose", action="store_true", help="Print detailed progress")
@@ -75,17 +91,62 @@ def _code_candidates_from_stem(stem: str) -> list[str]:
     return candidates
 
 
-def _build_pdf_index(hf_repo_path: Path, *, verbose: bool) -> tuple[dict[str, str], set[str], int]:
+def _require_hf_hub() -> None:
+    if HfApi is None:
+        raise RuntimeError(
+            "`huggingface_hub` is required for backfill_hf_path. Install with `pip install huggingface_hub`."
+        )
+
+
+def _extract_repo_id_from_url(repo_url: str) -> str:
+    text = (repo_url or "").strip()
+    if not text:
+        return ""
+    match = HF_REPO_URL_PATTERN.search(text)
+    if match:
+        return match.group(1).strip("/")
+    if "://" not in text and text.count("/") == 1:
+        return text.strip("/")
+    return ""
+
+
+def _resolve_repo_id(repo_id: str, repo_url: str) -> str:
+    normalized_repo_id = (repo_id or "").strip().strip("/")
+    if not normalized_repo_id:
+        normalized_repo_id = _extract_repo_id_from_url(repo_url)
+    if not normalized_repo_id:
+        raise ValueError(
+            "Unable to resolve HF dataset repo id. Set --hf-repo-id/--hf-repo-url "
+            "or configure hf.dataset_repo_id/hf.dataset_repo_url in import/import_config.yaml."
+        )
+    if normalized_repo_id.count("/") != 1:
+        raise ValueError(f"Invalid HF dataset repo id: {normalized_repo_id} (expected `namespace/name`).")
+    return normalized_repo_id
+
+
+def _list_remote_pdf_paths(hf_repo_id: str, *, hf_token: str, verbose: bool) -> list[str]:
+    _require_hf_hub()
+    token = (hf_token or "").strip() or None
+    api = HfApi(token=token)
+    try:
+        repo_files = api.list_repo_files(repo_id=hf_repo_id, repo_type="dataset", token=token)
+    except Exception as exc:
+        raise RuntimeError(f"Failed to list files from HF dataset repo `{hf_repo_id}`: {exc}") from exc
+
+    pdf_paths = sorted(path for path in repo_files if isinstance(path, str) and path.lower().endswith(".pdf"))
+    if verbose:
+        print(f"[hf] repo_id={hf_repo_id} files={len(repo_files)} pdfs={len(pdf_paths)}")
+    return pdf_paths
+
+
+def _build_pdf_index(pdf_paths: list[str], *, verbose: bool) -> tuple[dict[str, str], set[str], int]:
     code_to_relpath: dict[str, str] = {}
     ambiguous_codes: set[str] = set()
     scanned = 0
 
-    for pdf_path in sorted(hf_repo_path.rglob("*.pdf")):
-        if not pdf_path.is_file():
-            continue
+    for relpath in pdf_paths:
         scanned += 1
-        relpath = pdf_path.relative_to(hf_repo_path).as_posix()
-        for code in _code_candidates_from_stem(pdf_path.stem):
+        for code in _code_candidates_from_stem(Path(relpath).stem):
             if code in ambiguous_codes:
                 continue
             existing = code_to_relpath.get(code)
@@ -126,11 +187,10 @@ def _has_hf_path(row: dict[str, Any]) -> bool:
 
 def run_backfill_hf_path(config: BackfillHFPathConfig) -> BackfillHFPathReport:
     store = InfoStore(config.ledger_dir)
-    if not config.hf_repo_path.exists() or not config.hf_repo_path.is_dir():
-        raise FileNotFoundError(f"HF repo path not found: {config.hf_repo_path}")
 
     report = BackfillHFPathReport()
-    pdf_index, ambiguous_codes, scanned_pdf_files = _build_pdf_index(config.hf_repo_path, verbose=config.verbose)
+    pdf_paths = _list_remote_pdf_paths(config.hf_repo_id, hf_token=config.hf_token, verbose=config.verbose)
+    pdf_index, ambiguous_codes, scanned_pdf_files = _build_pdf_index(pdf_paths, verbose=config.verbose)
     report.pdf_files_scanned = scanned_pdf_files
     report.pdf_codes_indexed = len(pdf_index)
     report.pdf_codes_ambiguous = len(ambiguous_codes)
@@ -188,7 +248,7 @@ def run_backfill_hf_path(config: BackfillHFPathConfig) -> BackfillHFPathReport:
 def _print_report(report: BackfillHFPathReport, *, config: BackfillHFPathConfig) -> None:
     print("backfill-hf-path:")
     print(f"  ledger_dir: {config.ledger_dir}")
-    print(f"  hf_repo_path: {config.hf_repo_path}")
+    print(f"  hf_repo_id: {config.hf_repo_id}")
     print(f"  dry_run: {config.dry_run}")
     print(f"  batch_size: {config.batch_size}")
     print(f"  pdf_files_scanned: {report.pdf_files_scanned}")
@@ -204,9 +264,11 @@ def _print_report(report: BackfillHFPathReport, *, config: BackfillHFPathConfig)
 
 
 def run_from_args(args: argparse.Namespace) -> int:
+    hf_repo_id = _resolve_repo_id(args.hf_repo_id, args.hf_repo_url)
     config = BackfillHFPathConfig(
         ledger_dir=Path(args.ledger_dir).resolve(),
-        hf_repo_path=Path(args.hf_repo_path).resolve(),
+        hf_repo_id=hf_repo_id,
+        hf_token=(args.hf_token or "").strip(),
         dry_run=args.dry_run,
         batch_size=max(1, args.batch_size),
         verbose=args.verbose,
@@ -217,7 +279,7 @@ def run_from_args(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Backfill missing hf.path values from local HF repo PDFs.")
+    parser = argparse.ArgumentParser(description="Backfill missing hf.path values from remote HF dataset PDFs.")
     return configure_parser(parser)
 
 
