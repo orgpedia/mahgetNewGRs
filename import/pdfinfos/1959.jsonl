@@ -24,4 +24,4 @@
 {"created_at_utc": "2026-02-06T08:41:42Z", "record_key": "195912030000000105", "status": "not_attempted"}
 {"created_at_utc": "2026-02-06T08:41:42Z", "record_key": "195912040000000105", "status": "not_attempted"}
 {"created_at_utc": "2026-02-06T08:41:42Z", "record_key": "195912280000000129", "status": "not_attempted"}
-{"created_at_utc": "2026-02-06T08:41:42Z", "record_key": "201601051152511007", "status": "not_attempted"}
+{"created_at_utc": "2026-02-06T08:41:42Z", "error": "", "file_size": 30500, "fonts": {"19": {"name": "Times-Roman", "script_word_counts": {"Latin": 287}, "type": "Type1", "word_count": 287}, "20": {"name": "Times-Bold", "script_word_counts": {"Latin": 3}, "type": "Type1", "word_count": 3}, "22": {"name": "Times-Italic", "script_word_counts": {"Latin": 1}, "type": "Type1", "word_count": 1}}, "has_any_page_image": true, "language": {"inferred": "en", "script_word_counts": {"Latin": 291}, "total_words": 291}, "page_count": 1, "pages_with_images": 1, "record_key": "201601051152511007", "status": "success", "total_font_count": 5, "unresolved_word_count": 0}

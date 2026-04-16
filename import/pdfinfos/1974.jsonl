@@ -59,10 +59,10 @@
 {"created_at_utc": "2026-02-06T08:41:42Z", "record_key": "197411020000000112", "status": "not_attempted"}
 {"created_at_utc": "2026-02-06T08:41:42Z", "record_key": "197411190000000119", "status": "not_attempted"}
 {"created_at_utc": "2026-02-06T08:41:42Z", "record_key": "197412300000000119", "status": "not_attempted"}
-{"created_at_utc": "2026-02-06T08:41:42Z", "record_key": "20050205174727001", "status": "not_attempted"}
-{"created_at_utc": "2026-02-06T08:41:42Z", "record_key": "20051104152228001", "status": "not_attempted"}
-{"created_at_utc": "2026-02-06T08:41:42Z", "record_key": "20051205134618001", "status": "not_attempted"}
-{"created_at_utc": "2026-02-06T08:41:42Z", "record_key": "20070808153116001", "status": "not_attempted"}
-{"created_at_utc": "2026-02-06T08:41:42Z", "record_key": "20070813170808001", "status": "not_attempted"}
-{"created_at_utc": "2026-02-06T08:41:42Z", "record_key": "20070827145912001", "status": "not_attempted"}
-{"created_at_utc": "2026-02-06T08:41:42Z", "record_key": "201405121108287527", "status": "not_attempted"}
+{"created_at_utc": "2026-02-06T08:41:42Z", "error": "", "file_size": 99117, "fonts": {}, "has_any_page_image": true, "language": {"inferred": "unknown", "script_word_counts": {}, "total_words": 0}, "page_count": 3, "pages_with_images": 3, "record_key": "20050205174727001", "status": "success", "total_font_count": 0, "unresolved_word_count": 0}
+{"created_at_utc": "2026-02-06T08:41:42Z", "error": "", "file_size": 76153, "fonts": {}, "has_any_page_image": true, "language": {"inferred": "unknown", "script_word_counts": {}, "total_words": 0}, "page_count": 2, "pages_with_images": 2, "record_key": "20051104152228001", "status": "success", "total_font_count": 0, "unresolved_word_count": 0}
+{"created_at_utc": "2026-02-06T08:41:42Z", "error": "", "file_size": 106798, "fonts": {}, "has_any_page_image": true, "language": {"inferred": "unknown", "script_word_counts": {}, "total_words": 0}, "page_count": 2, "pages_with_images": 2, "record_key": "20051205134618001", "status": "success", "total_font_count": 0, "unresolved_word_count": 0}
+{"created_at_utc": "2026-02-06T08:41:42Z", "error": "", "file_size": 228436, "fonts": {}, "has_any_page_image": true, "language": {"inferred": "unknown", "script_word_counts": {}, "total_words": 0}, "page_count": 3, "pages_with_images": 3, "record_key": "20070808153116001", "status": "success", "total_font_count": 0, "unresolved_word_count": 0}
+{"created_at_utc": "2026-02-06T08:41:42Z", "error": "", "file_size": 70208, "fonts": {}, "has_any_page_image": true, "language": {"inferred": "unknown", "script_word_counts": {}, "total_words": 0}, "page_count": 1, "pages_with_images": 1, "record_key": "20070813170808001", "status": "success", "total_font_count": 0, "unresolved_word_count": 0}
+{"created_at_utc": "2026-02-06T08:41:42Z", "error": "", "file_size": 154591, "fonts": {}, "has_any_page_image": true, "language": {"inferred": "unknown", "script_word_counts": {}, "total_words": 0}, "page_count": 2, "pages_with_images": 2, "record_key": "20070827145912001", "status": "success", "total_font_count": 0, "unresolved_word_count": 0}
+{"created_at_utc": "2026-02-06T08:41:42Z", "error": "", "file_size": 94988, "fonts": {}, "has_any_page_image": true, "language": {"inferred": "unknown", "script_word_counts": {}, "total_words": 0}, "page_count": 3, "pages_with_images": 3, "record_key": "201405121108287527", "status": "success", "total_font_count": 0, "unresolved_word_count": 0}
