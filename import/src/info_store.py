@@ -822,7 +822,7 @@ class InfoStore:
             stage_obj = {}
             upload_row[stage] = stage_obj
         current_attempts = _to_int(stage_obj.get("attempts"), 0)
-        if current_attempts >= 2:
+        if current_attempts >= 4:
             raise RetryLimitExceededError(f"Retry limit exceeded for unique_code={record_key} stage={stage}")
         stage_obj["attempts"] = current_attempts + 1
 

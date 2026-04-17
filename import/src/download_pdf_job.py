@@ -134,7 +134,7 @@ def _select_download_candidates(store: LedgerStore, config: DownloadJobConfig) -
         allowed_states=config.allowed_states,
         stage="download",
         code_filter=config.code_filter,
-        max_attempts=2,
+        max_attempts=4,
         lookback_days=config.lookback_days,
     )
     print(f'Stage candidates: {len(stage_candidates)}')

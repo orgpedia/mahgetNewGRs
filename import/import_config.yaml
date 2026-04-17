@@ -1,5 +1,5 @@
 attempt_thresholds:
-  download: 3
+  download: 5
   wayback: 3
   archive: 3
   hf: 3

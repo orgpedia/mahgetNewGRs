@@ -477,7 +477,7 @@ class LedgerStore:
         current_attempts = attempts.get(stage, 0)
         if not isinstance(current_attempts, int):
             raise LedgerError(f"attempt_counts.{stage} must be int")
-        if current_attempts >= 2:
+        if current_attempts >= 4:
             raise RetryLimitExceededError(
                 f"Retry limit exceeded for unique_code={unique_code} stage={stage}"
             )
@@ -561,8 +561,8 @@ class LedgerStore:
             value = attempts.get(stage, 0)
             if not isinstance(value, int):
                 raise LedgerError(f"attempt_counts.{stage} must be int")
-            if value < 0 or value > 2:
-                raise LedgerError(f"attempt_counts.{stage} must be in [0,2], got {value}")
+            if value < 0 or value > 4:
+                raise LedgerError(f"attempt_counts.{stage} must be in [0,4], got {value}")
 
     def _validate_attempt_counts_non_decreasing(
         self,
