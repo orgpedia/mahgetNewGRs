@@ -1,0 +1,57 @@
+Total downloaded Documents: 1,57,789
+Text pdfs: 1,26,246
+Image/Missing pdfs: 31,442
+Text pdfs without sakal marathi font: 2,849
+Text pdfs with Sakal marathi font: 1,23,397
+Text pdfs with only Sakal font: 81,870
+
+File count by font
+SakalMarathi 1,19,994
+Mangal 33,884
+DVOT-SurekhMR 6,477
+DVOT-SurekhMRBold 6039
+SakalMarathi-Normal 3603
+NirmalaUI 1707
+MangalBold 1173
+NirmalaUIBold 1148
+DVOT-Surekh 714
+DVOTSurekhMRNormal 500
+DVOT-SurekhBold 464
+F1 459
+DVOTSurekhMRBold 447
+Kokila 269
+DVOT-YogeshMR 251
+DVOTSurekhNormal 242
+KokilaBold 233
+DVOT-YogeshMRBold 202
+
+
+Word count by font
+SakalMarathi 229543952
+DVOT-SurekhMR 10749265
+SakalMarathi-Normal 8577095
+DVOT-SurekhMRBold 1471971
+F1 1154095
+DVOTSurekhMRNormal 1045174
+Mangal 967772
+DVOT-Surekh 639980
+Kokila 554163
+NirmalaUI 463029
+DVOT-Yogesh 304382
+DVOTSurekhNormal 254616
+DVOT-YogeshMR 231962
+DVOT-SurekhBold 150249
+DVOTSurekhMRBold 148132
+MangalBold 122037
+Kokila-Bold 106702
+KokilaBold 67035
+DVOT-YogeshMRBold 45719
+NirmalaUIBold 44018
+DVOTSurekhBold 37466
+Utsaah 34336
+NirmalaUI-Bold 28940
+F2 26674
+CIDFont+F2 23520
+F3 16591
+CIDFont+F1 12843
+DVOTSurekhMRBoldItalic 11203
